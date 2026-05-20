@@ -1,6 +1,7 @@
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 app.use(express.json());
@@ -10,20 +11,20 @@ const ALPACA_SECRET = process.env.ALPACA_SECRET_KEY;
 const FINNHUB_KEY   = process.env.FINNHUB_API_KEY;
 const GROQ_KEY      = process.env.GROQ_API_KEY;
 const ACCESS_PIN    = process.env.ACCESS_PIN;
+const SUPABASE_URL  = process.env.SUPABASE_URL;
+const SUPABASE_KEY  = process.env.SUPABASE_KEY;
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const ALPACA_BASE  = 'https://paper-api.alpaca.markets/v2';
 const FINNHUB_BASE = 'https://finnhub.io/api/v1';
-
 const MAX_POSITION_USD = 500;
 const STOP_LOSS_PCT    = 0.05;
 const TAKE_PROFIT_PCT  = 0.12;
 
 const alpaca = axios.create({
   baseURL: ALPACA_BASE,
-  headers: {
-    'APCA-API-KEY-ID': ALPACA_KEY,
-    'APCA-API-SECRET-KEY': ALPACA_SECRET,
-  },
+  headers: { 'APCA-API-KEY-ID': ALPACA_KEY, 'APCA-API-SECRET-KEY': ALPACA_SECRET },
 });
 
 async function getAccount() { const { data } = await alpaca.get('/account'); return data; }
@@ -113,53 +114,72 @@ async function runScan() {
   }
 }
 
+// ─── CHAT MEMORY ─────────────────────────────────────────────────────────────
+async function saveChatMessage(role, content) {
+  await supabase.from('pulsetrader_chats').insert({ role, content });
+}
+
+async function loadChatHistory() {
+  const { data } = await supabase
+    .from('pulsetrader_chats')
+    .select('role, content')
+    .order('created_at', { ascending: true })
+    .limit(20);
+  return data || [];
+}
+
 async function buildMarketContext() {
   try {
     const [account, positions, orders, signals] = await Promise.all([getAccount(), getPositions(), getOpenOrders(), scanEdgarFilings()]);
     return {
       buying_power: account.buying_power,
       equity: account.equity,
-      positions: positions.map(p => ({ symbol: p.symbol, qty: p.qty, entry: p.avg_entry_price, current: p.current_price, pnl: p.unrealized_pl, pnl_pct: (parseFloat(p.unrealized_plpc)*100).toFixed(2)+'%' })),
+      positions: positions.map(p => ({ symbol: p.symbol, qty: p.qty, entry: p.avg_entry_price, current: p.current_price, pnl: p.unrealized_pl })),
       open_orders: orders.length,
       edgar_catalysts: signals.slice(0, 5),
     };
   } catch (e) { return { error: 'Could not load market data' }; }
 }
 
-// ─── PIN CHECK ────────────────────────────────────────────────────────────────
 app.post('/verify-pin', (req, res) => {
   const { pin } = req.body;
-  if (pin === ACCESS_PIN) {
-    res.json({ success: true });
-  } else {
-    res.status(401).json({ success: false });
-  }
+  pin === ACCESS_PIN ? res.json({ success: true }) : res.status(401).json({ success: false });
 });
 
 app.post('/chat', async (req, res) => {
   const { message } = req.body;
   if (!message) return res.status(400).json({ error: 'No message' });
-  const context = await buildMarketContext();
-  const systemPrompt = `You are PulseTrader, an AI trading assistant that talks like Jeezy — street smart, confident, direct, uses Atlanta slang naturally but stays focused on the money. You have real-time access to the user's paper trading account and market data.
 
-Current Account Data:
+  const [context, history] = await Promise.all([buildMarketContext(), loadChatHistory()]);
+
+  const systemPrompt = `You are PulseTrader, an AI trading assistant that talks like Jeezy — street smart, confident, direct, Atlanta energy but always focused on the money. You have real-time access to the user's paper trading account.
+
+Current Account:
 ${JSON.stringify(context, null, 2)}
 
 Rules:
-- Keep responses short and punchy like Jeezy would
-- Reference actual numbers from the account data when relevant
-- Give real trading insight mixed with the street energy
-- If asked about a stock, give your honest take
-- Never be corny or forced with the slang — keep it natural`;
+- Short punchy responses like Jeezy
+- Reference real numbers from account data
+- Real trading insight with street energy
+- Never corny or forced with slang`;
+
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    ...history,
+    { role: 'user', content: message },
+  ];
 
   try {
     const { data } = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
       model: 'llama3-8b-8192',
-      messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: message }],
+      messages,
       max_tokens: 300,
       temperature: 0.85,
     }, { headers: { 'Authorization': `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' } });
-    res.json({ reply: data.choices[0].message.content });
+
+    const reply = data.choices[0].message.content;
+    await Promise.all([saveChatMessage('user', message), saveChatMessage('assistant', reply)]);
+    res.json({ reply });
   } catch (e) {
     res.status(500).json({ error: 'Chat failed' });
   }
@@ -207,12 +227,7 @@ app.get('/', (req, res) => {
     <h1>⚡ PulseTrader</h1>
     <p>Real-time market intelligence</p>
   </div>
-  <div id="messages">
-    <div class="msg bot">
-      <div class="bot-name">PULSETRADER</div>
-      Welcome back. Ask me what we holdin, what EDGAR droppin, or gimme a ticker. Trap money don't sleep 💰
-    </div>
-  </div>
+  <div id="messages" id="messages"></div>
   <div id="input-area">
     <input id="input" placeholder="Ask about stocks, positions..." />
     <button id="send">Send</button>
@@ -224,36 +239,43 @@ app.get('/', (req, res) => {
   const pinInput = document.getElementById('pin-input');
   const pinBtn = document.getElementById('pin-btn');
   const pinError = document.getElementById('pin-error');
+  const messages = document.getElementById('messages');
+  const input = document.getElementById('input');
+  const send = document.getElementById('send');
 
   if (sessionStorage.getItem('unlocked') === 'true') {
     lockScreen.style.display = 'none';
     appDiv.style.display = 'flex';
+    loadHistory();
   }
 
   async function unlock() {
     const pin = pinInput.value.trim();
-    const res = await fetch('/verify-pin', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pin }),
-    });
+    const res = await fetch('/verify-pin', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin }) });
     const data = await res.json();
     if (data.success) {
       sessionStorage.setItem('unlocked', 'true');
       lockScreen.style.display = 'none';
       appDiv.style.display = 'flex';
+      loadHistory();
     } else {
       pinError.style.display = 'block';
       pinInput.value = '';
     }
   }
 
+  async function loadHistory() {
+    const res = await fetch('/history');
+    const data = await res.json();
+    if (data.length === 0) {
+      addMsg('Welcome back. Ask me what we holdin, what EDGAR droppin, or gimme a ticker. Trap money don\\'t sleep 💰', 'bot');
+    } else {
+      data.forEach(m => addMsg(m.content, m.role === 'user' ? 'user' : 'bot'));
+    }
+  }
+
   pinBtn.addEventListener('click', unlock);
   pinInput.addEventListener('keypress', e => { if (e.key === 'Enter') unlock(); });
-
-  const messages = document.getElementById('messages');
-  const input = document.getElementById('input');
-  const send = document.getElementById('send');
 
   function addMsg(text, type) {
     const div = document.createElement('div');
@@ -272,18 +294,11 @@ app.get('/', (req, res) => {
     addMsg(msg, 'user');
     const typing = addMsg('thinking...', 'bot');
     try {
-      const res = await fetch('/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: msg }),
-      });
+      const res = await fetch('/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: msg }) });
       const data = await res.json();
       typing.remove();
       addMsg(data.reply || data.error, 'bot');
-    } catch (e) {
-      typing.remove();
-      addMsg('Connection error', 'bot');
-    }
+    } catch (e) { typing.remove(); addMsg('Connection error', 'bot'); }
   }
 
   send.addEventListener('click', sendMessage);
@@ -291,6 +306,11 @@ app.get('/', (req, res) => {
 </script>
 </body>
 </html>`);
+});
+
+app.get('/history', async (req, res) => {
+  const history = await loadChatHistory();
+  res.json(history);
 });
 
 app.get('/account', async (req, res) => { try { const d = await getAccount(); res.json({ buying_power: d.buying_power, equity: d.equity }); } catch (e) { res.status(500).json({ error: e.message }); } });
