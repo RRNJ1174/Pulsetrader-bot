@@ -1,7 +1,7 @@
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║   PULSETRADER v7.0 — FULL MARKET SCANNER + SELF-LEARNING AUTO TRADER   ║
-// ║   Automatically finds ALL top gainers across entire market              ║
-// ║   Analyzes WHY they move → learns patterns → trades for max profit      ║
+// ║   PULSETRADER v7.1 — FULL MARKET SCANNER + SELF-LEARNING AUTO TRADER   ║
+// ║   Fixes: Real gainers only — no hallucinated tickers                    ║
+// ║   Alpaca screener → Finnhub backup → AI analysis → Auto trade           ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
 
 import express from "express";
@@ -18,28 +18,24 @@ app.use(express.static("public"));
 // ════════════════════════════════════════════════════════════════════════════
 
 const CONFIG = {
-  MAX_POSITIONS:    5,
-  POSITION_SIZE:    1000,
-  MIN_SPIKE_PCT:    5,
-  MAX_PRICE:        20,
-  MIN_PRICE:        0.30,
-  MIN_VOLUME:       50000,
-  PROFIT_TARGET:    25,
-  STOP_LOSS:        10,
-  SCAN_INTERVAL:    5 * 60 * 1000,
-  MIN_CONVICTION:   7,
-  TOP_GAINERS_COUNT:50,   // scan top 50 gainers across whole market
+  MAX_POSITIONS:      5,
+  POSITION_SIZE:      1000,
+  MIN_SPIKE_PCT:      5,
+  MAX_PRICE:          20,
+  MIN_PRICE:          0.30,
+  MIN_VOLUME:         30000,
+  PROFIT_TARGET:      25,
+  STOP_LOSS:          10,
+  SCAN_INTERVAL:      5 * 60 * 1000,
+  MIN_CONVICTION:     7,
+  TOP_GAINERS_COUNT:  50,
 };
 
-// Self-learning brain
 const BRAIN = {
   totalTrades:0, wins:0, losses:0, totalPnL:0,
-  bestSetups:{}, bestHours:{}, bestSectors:{},
-  worstTickers:[], bestTickers:[],
-  recentPerformance:[],
-  adjustedTarget:25, adjustedStop:10,
-  lessons:[],          // what bot has learned
-  lastLearned:null,
+  bestSetups:{}, bestHours:{}, worstTickers:[], bestTickers:[],
+  recentPerformance:[], adjustedTarget:25, adjustedStop:10,
+  lessons:[], lastLearned:null,
 };
 
 const tradeLog   = [];
@@ -51,46 +47,40 @@ let lastGainers      = [];
 let lastAnalysis     = "";
 
 // ════════════════════════════════════════════════════════════════════════════
-// DYNAMIC SYSTEM PROMPT — evolves with learning
+// SYSTEM PROMPT
 // ════════════════════════════════════════════════════════════════════════════
 
 const buildSystem = () => {
   const wr = BRAIN.totalTrades > 0
     ? ((BRAIN.wins/BRAIN.totalTrades)*100).toFixed(1)+"%" : "learning";
-
   const topSetups = Object.entries(BRAIN.bestSetups)
     .sort((a,b)=>b[1].winRate-a[1].winRate).slice(0,3)
     .map(([k,v])=>`${k}(${v.winRate.toFixed(0)}%win)`).join(", ") || "collecting data";
-
   const recentLessons = BRAIN.lessons.slice(0,5).map(l=>`- ${l}`).join("\n") || "none yet";
 
   return `You are PulseTrader — elite self-learning AI momentum trader.
-You specialize in finding and trading small cap stocks BEFORE and DURING spikes.
+You ONLY analyze real stocks with real data provided to you. NEVER invent tickers or prices.
+If no data is provided, say "No real gainers found right now."
 
 YOUR LIVE PERFORMANCE:
 - Win rate: ${wr} (${BRAIN.wins}W/${BRAIN.losses}L)
 - Total P&L: $${BRAIN.totalPnL.toFixed(2)}
 - Best setups: ${topSetups}
-- Tickers to AVOID: ${BRAIN.worstTickers.slice(0,8).join(",")||"none"}
+- Avoid: ${BRAIN.worstTickers.slice(0,8).join(",")||"none"}
 - Proven winners: ${BRAIN.bestTickers.slice(0,8).join(",")||"none"}
-- Adjusted target: +${BRAIN.adjustedTarget}% | Stop: -${BRAIN.adjustedStop}%
+- Target: +${BRAIN.adjustedTarget}% | Stop: -${BRAIN.adjustedStop}%
 
-WHAT YOU'VE LEARNED:
+LESSONS LEARNED:
 ${recentLessons}
 
-CORE STRATEGY — finding stocks like WHLR +110%, PCLA +94%, EDHL +80%:
-1. CATALYST FIRST — FDA approval, earnings beat, contract, merger, short squeeze news
-2. LOW FLOAT — under 15M shares = explosive moves on small volume
-3. VOLUME CONFIRMATION — volume must be 3x+ above average
-4. PRICE RANGE — $0.30-$20 sweet spot for big % moves
-5. EARLY ENTRY — first 30-60 min after catalyst drops
-6. SECTOR MOMENTUM — biotechs, crypto stocks, EV move in groups
+STRATEGY — finding stocks like WHLR +110%, PCLA +94%, EDHL +80%:
+1. CATALYST — FDA, earnings beat, contract, merger, short squeeze news
+2. LOW FLOAT — under 15M shares = explosive moves
+3. VOLUME — 3x+ above average confirms the move
+4. PRICE — $0.30-$20 sweet spot
+5. TIMING — first 30-60 min after catalyst
 
-ENTRY: Enter on volume confirmation after catalyst
-EXIT: +${BRAIN.adjustedTarget}% target, -${BRAIN.adjustedStop}% stop, volume dry-up = exit
-
-ANALYSIS FORMAT FOR EACH STOCK:
-📊 TICKER | Price | % Move | Float | Catalyst | Setup | Conviction/10 | Entry | Target | Stop`;
+FORMAT: 📊 TICKER | Price | % Move | Float | Catalyst | Setup | Conviction/10 | Entry | Target | Stop`;
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -170,88 +160,90 @@ const finnhub = async (path) => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// TOP GAINERS SCANNER — finds ALL top movers across entire market
+// TOP GAINERS — real data only, no hallucination
 // ════════════════════════════════════════════════════════════════════════════
 
 const getTopGainers = async () => {
   const gainers = [];
 
-  // Method 1: Alpaca screener — real top gainers across ALL US stocks
+  // Method 1: Alpaca full market screener
   try {
-    const data = await alpacaData(
-      `/v1beta1/screener/stocks/movers?by=percent_change&top=${CONFIG.TOP_GAINERS_COUNT}`
-    );
-    if (data.gainers?.length) {
-      for (const g of data.gainers) {
-        if (
-          g.price >= CONFIG.MIN_PRICE &&
-          g.price <= CONFIG.MAX_PRICE &&
-          g.percent_change >= CONFIG.MIN_SPIKE_PCT &&
-          !BRAIN.worstTickers.includes(g.symbol)
-        ) {
-          gainers.push({
-            ticker:  g.symbol,
-            c:       g.price,
-            dp:      g.percent_change,
-            v:       g.volume || 0,
-            h:       g.price,
-            l:       g.price,
-            source:  "alpaca_screener",
-          });
-        }
-      }
-      console.log(`📡 Alpaca screener: ${gainers.length} qualifying gainers`);
-    }
-  } catch(e) {
-    console.log("Alpaca screener fallback:", e.message);
-  }
-
-  // Method 2: Finnhub market screener as backup + supplement
-  if (gainers.length < 10) {
-    try {
-      // Scan a broad list of small cap tickers from Finnhub
-      const BROAD_SCAN = [
-        "WHLR","PCLA","EDHL","ATPC","LIMN","ILLR","NCPL","VIDA","DGNX","JUNS",
-        "HCWB","SLXN","PHGE","GCL","MLGO","SOUN","MARA","RIOT","CIFR","BTBT",
-        "HUT","WULF","CLSK","SPCE","NKLA","CLOV","WISH","IDEX","NAKD","SNDL",
-        "OCGN","NVAX","ADMA","BNGO","SRNE","TGTX","EDSA","FBRX","HTBX","SAVA",
-        "TE","PETZ","BTM","ORBS","AMMO","STFS","JDZG","CAPS","CTEV","SLQT",
-        "COIN","PLTR","SOFI","HOOD","FUTU","TIGR","UWMC","OPEN","LMND","HIMS",
-        "ATXI","GNPX","NKGN","IMVT","AGEN","ALBO","ALEC","ALNA","ALRM","ALRS",
-        "CYRX","TRIL","IRNC","ALTTF","LAUR","TRCH","RRGB","GIPR","CDT","WNW",
-        "GMEX","KULR","MULN","STEM","VERB","XCUR","INPX","RVNC","QUBT","KPLT",
-        "BBCP","CLFD","JSPR","TDUP","ACMR","IRNT","FBRT","GBOX","MNMD","SMAR",
-      ];
-
-      const batchSize = 15;
-      for (let i=0; i<BROAD_SCAN.length; i+=batchSize) {
-        const batch = BROAD_SCAN.slice(i,i+batchSize);
-        const quotes = await Promise.all(
-          batch.map(t=>finnhub(`/quote?symbol=${t}`).then(q=>({ticker:t,...q})).catch(()=>null))
-        );
-        for (const q of quotes.filter(Boolean)) {
-          if (
-            q.c >= CONFIG.MIN_PRICE &&
-            q.c <= CONFIG.MAX_PRICE &&
-            q.dp >= CONFIG.MIN_SPIKE_PCT &&
-            q.v  >= CONFIG.MIN_VOLUME &&
-            !BRAIN.worstTickers.includes(q.ticker) &&
-            !gainers.find(g=>g.ticker===q.ticker)
-          ) {
-            gainers.push({ ticker:q.ticker, c:q.c, dp:q.dp, v:q.v, h:q.h, l:q.l, source:"finnhub" });
+    const urls = [
+      `/v1beta1/screener/stocks/movers?by=percent_change&top=${CONFIG.TOP_GAINERS_COUNT}&market_type=sip`,
+      `/v1beta1/screener/stocks/movers?by=percent_change&top=${CONFIG.TOP_GAINERS_COUNT}`,
+    ];
+    for (const url of urls) {
+      try {
+        const data = await alpacaData(url);
+        if (data.gainers?.length) {
+          for (const g of data.gainers) {
+            if (
+              g.price      >= CONFIG.MIN_PRICE  &&
+              g.price      <= CONFIG.MAX_PRICE  &&
+              g.percent_change >= CONFIG.MIN_SPIKE_PCT &&
+              !BRAIN.worstTickers.includes(g.symbol)
+            ) {
+              gainers.push({
+                ticker: g.symbol,
+                c:      g.price,
+                dp:     g.percent_change,
+                v:      g.volume || 0,
+                h:      g.price,
+                l:      g.price,
+                source: "alpaca_screener",
+              });
+            }
           }
+          console.log(`📡 Alpaca screener: ${gainers.length} qualifying gainers`);
+          break;
         }
-        if (i+batchSize < BROAD_SCAN.length) await new Promise(r=>setTimeout(r,250));
-      }
-    } catch(e) { console.log("Finnhub scan error:", e.message); }
-  }
+      } catch(e) { console.log("Alpaca URL attempt failed:", e.message); }
+    }
+  } catch(e) { console.log("Alpaca screener error:", e.message); }
 
-  // Sort by % gain
-  return gainers.sort((a,b) => b.dp - a.dp);
+  // Method 2: Finnhub broad scan as backup
+  const BROAD_SCAN = [
+    "WHLR","PCLA","EDHL","ATPC","LIMN","ILLR","NCPL","VIDA","DGNX","JUNS",
+    "HCWB","SLXN","PHGE","GCL","MLGO","SOUN","MARA","RIOT","CIFR","BTBT",
+    "HUT","WULF","CLSK","SPCE","NKLA","CLOV","WISH","IDEX","NAKD","SNDL",
+    "OCGN","NVAX","ADMA","BNGO","SRNE","TGTX","EDSA","FBRX","HTBX","SAVA",
+    "TE","PETZ","BTM","ORBS","AMMO","STFS","JDZG","CAPS","CTEV","SLQT",
+    "COIN","PLTR","SOFI","HOOD","FUTU","TIGR","LMND","HIMS","OPEN","SMAR",
+    "ATXI","NKGN","IMVT","AGEN","CYRX","TRIL","IRNC","RRGB","GIPR","CDT",
+    "GMEX","KULR","MULN","STEM","VERB","XCUR","INPX","RVNC","QUBT","KPLT",
+    "BBCP","CLFD","JSPR","TDUP","ACMR","IRNT","FBRT","GBOX","MNMD","ALTTF",
+    "LAUR","TRCH","WNW","MSGY","EGHT","UWMC","MNMD","ALRS","ALBO","ALNA",
+  ];
+
+  try {
+    const batchSize = 15;
+    for (let i=0; i<BROAD_SCAN.length; i+=batchSize) {
+      const batch  = BROAD_SCAN.slice(i,i+batchSize);
+      const quotes = await Promise.all(
+        batch.map(t=>finnhub(`/quote?symbol=${t}`).then(q=>({ticker:t,...q})).catch(()=>null))
+      );
+      for (const q of quotes.filter(Boolean)) {
+        if (
+          q.c  >= CONFIG.MIN_PRICE  &&
+          q.c  <= CONFIG.MAX_PRICE  &&
+          q.dp >= CONFIG.MIN_SPIKE_PCT &&
+          q.v  >= CONFIG.MIN_VOLUME &&
+          !BRAIN.worstTickers.includes(q.ticker) &&
+          !gainers.find(g=>g.ticker===q.ticker)
+        ) {
+          gainers.push({ticker:q.ticker,c:q.c,dp:q.dp,v:q.v,h:q.h,l:q.l,source:"finnhub"});
+        }
+      }
+      if (i+batchSize < BROAD_SCAN.length) await new Promise(r=>setTimeout(r,250));
+    }
+    console.log(`🔍 Finnhub scan added ${gainers.filter(g=>g.source==="finnhub").length} more gainers`);
+  } catch(e) { console.log("Finnhub scan error:", e.message); }
+
+  return gainers.sort((a,b)=>b.dp-a.dp);
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// DEEP ANALYSIS — bot studies WHY stocks are moving
+// DEEP ANALYSIS — WHY is this stock moving?
 // ════════════════════════════════════════════════════════════════════════════
 
 const analyzeGainer = async (ticker, price, pct) => {
@@ -262,19 +254,19 @@ const analyzeGainer = async (ticker, price, pct) => {
       finnhub(`/stock/profile2?symbol=${ticker}`),
       finnhub(`/company-news?symbol=${ticker}&from=${week}&to=${today}`),
     ]);
-    const headlines = Array.isArray(news)
-      ? news.slice(0,5).map(n=>`- ${n.headline}`).join("\n") : "No news found";
     return {
       ticker, price, pct,
       float:    profile.shareOutstanding || "unknown",
       industry: profile.finnhubIndustry  || "unknown",
-      headlines,
+      headlines: Array.isArray(news) ? news.slice(0,4).map(n=>`- ${n.headline}`).join("\n") : "No news",
     };
-  } catch(e) { return { ticker, price, pct, float:"?", industry:"?", headlines:"No data" }; }
+  } catch(e) {
+    return {ticker, price, pct, float:"?", industry:"?", headlines:"No data"};
+  }
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// SELF-LEARNING
+// SELF-LEARNING ENGINE
 // ════════════════════════════════════════════════════════════════════════════
 
 const learnFromTrade = async (trade) => {
@@ -284,8 +276,7 @@ const learnFromTrade = async (trade) => {
   BRAIN.totalPnL += trade.pnl || 0;
 
   if (trade.setup) {
-    if (!BRAIN.bestSetups[trade.setup])
-      BRAIN.bestSetups[trade.setup] = {trades:0,wins:0,winRate:0};
+    if (!BRAIN.bestSetups[trade.setup]) BRAIN.bestSetups[trade.setup]={trades:0,wins:0,winRate:0};
     BRAIN.bestSetups[trade.setup].trades++;
     if (won) BRAIN.bestSetups[trade.setup].wins++;
     BRAIN.bestSetups[trade.setup].winRate =
@@ -302,7 +293,6 @@ const learnFromTrade = async (trade) => {
   BRAIN.recentPerformance.unshift({...trade,won});
   BRAIN.recentPerformance = BRAIN.recentPerformance.slice(0,20);
 
-  // Dynamically adjust strategy
   const rw = BRAIN.recentPerformance.filter(t=>t.won).length;
   const rt = BRAIN.recentPerformance.length;
   if (rt >= 5) {
@@ -310,52 +300,44 @@ const learnFromTrade = async (trade) => {
     if (rate > 0.65) {
       BRAIN.adjustedTarget = Math.min(40, BRAIN.adjustedTarget+2);
       CONFIG.MIN_CONVICTION = Math.max(6, CONFIG.MIN_CONVICTION-1);
-      console.log("📈 Winning streak — getting more aggressive");
+      CONFIG.PROFIT_TARGET  = BRAIN.adjustedTarget;
+      console.log("📈 Winning streak — more aggressive");
     } else if (rate < 0.35) {
       BRAIN.adjustedTarget = Math.max(15, BRAIN.adjustedTarget-2);
       BRAIN.adjustedStop   = Math.max(5,  BRAIN.adjustedStop-1);
       CONFIG.MIN_CONVICTION = Math.min(9, CONFIG.MIN_CONVICTION+1);
-      console.log("📉 Losing streak — getting more conservative");
+      CONFIG.PROFIT_TARGET  = BRAIN.adjustedTarget;
+      CONFIG.STOP_LOSS      = BRAIN.adjustedStop;
+      console.log("📉 Losing streak — more conservative");
     }
-    CONFIG.PROFIT_TARGET = BRAIN.adjustedTarget;
-    CONFIG.STOP_LOSS     = BRAIN.adjustedStop;
   }
 
-  // AI lesson extraction
   try {
     const lesson = await groq(
-      `Trade result: ${trade.symbol} | ${won?"WIN ✅":"LOSS ❌"}\n` +
-      `P&L: $${trade.pnl?.toFixed(2)} (${trade.pnlPct?.toFixed(1)}%)\n` +
-      `Entry $${trade.entryPrice} → Exit $${trade.exitPrice}\n` +
-      `Setup: ${trade.setup} | Reason: ${trade.reason}\n\n` +
-      `In ONE sentence: what specific lesson should I remember for future trades?`,
-      100
+      `Trade: ${trade.symbol} | ${won?"WIN ✅":"LOSS ❌"} | P&L: $${trade.pnl?.toFixed(2)}\n` +
+      `Entry $${trade.entryPrice} → Exit $${trade.exitPrice} | Setup: ${trade.setup}\n\n` +
+      `ONE sentence lesson for future trades:`,100
     );
-    BRAIN.lessons.unshift(lesson.replace(/^[\n\s]+/,""));
+    BRAIN.lessons.unshift(lesson.trim());
     BRAIN.lessons = BRAIN.lessons.slice(0,10);
     BRAIN.lastLearned = new Date().toISOString();
     console.log(`🧠 Lesson: ${lesson}`);
   } catch(e) {}
 
-  // Save to Supabase
-  await supabase("bot_trade_memory",{
-    method:"POST",
-    body:JSON.stringify({
-      symbol:trade.symbol, side:"LONG",
-      entry_price:trade.entryPrice, exit_price:trade.exitPrice,
-      pnl:trade.pnl, pnl_pct:trade.pnlPct,
-      entry_reason:trade.reason, exit_reason:trade.exitReason,
-      setup_type:trade.setup, won,
-      entry_hour:new Date().getHours(),
-      day_of_week:new Date().getDay(),
-    }),
-  }).catch(()=>{});
+  await supabase("bot_trade_memory",{method:"POST",body:JSON.stringify({
+    symbol:trade.symbol,side:"LONG",
+    entry_price:trade.entryPrice,exit_price:trade.exitPrice,
+    pnl:trade.pnl,pnl_pct:trade.pnlPct,
+    entry_reason:trade.reason,exit_reason:trade.exitReason,
+    setup_type:trade.setup,won,
+    entry_hour:new Date().getHours(),day_of_week:new Date().getDay(),
+  })}).catch(()=>{});
 };
 
 const loadMemory = async () => {
   try {
     const mem = await supabase("bot_trade_memory?order=created_at.desc&limit=200");
-    if (!Array.isArray(mem)||!mem.length) return;
+    if (!Array.isArray(mem)||!mem.length) { console.log("🧠 Fresh start"); return; }
     BRAIN.totalTrades = mem.length;
     BRAIN.wins        = mem.filter(m=>m.won).length;
     BRAIN.losses      = mem.filter(m=>!m.won).length;
@@ -368,18 +350,15 @@ const loadMemory = async () => {
         BRAIN.bestSetups[m.setup_type].winRate=
           (BRAIN.bestSetups[m.setup_type].wins/BRAIN.bestSetups[m.setup_type].trades)*100;
       }
-      if (m.won&&!BRAIN.bestTickers.includes(m.symbol))  BRAIN.bestTickers.push(m.symbol);
-      if (!m.won&&!BRAIN.worstTickers.includes(m.symbol)) BRAIN.worstTickers.push(m.symbol);
+      if (m.won  && !BRAIN.bestTickers.includes(m.symbol))  BRAIN.bestTickers.push(m.symbol);
+      if (!m.won && !BRAIN.worstTickers.includes(m.symbol)) BRAIN.worstTickers.push(m.symbol);
     });
     BRAIN.bestTickers  = BRAIN.bestTickers.slice(0,15);
     BRAIN.worstTickers = BRAIN.worstTickers.slice(0,20);
-
-    // Load saved lessons
     const lessons = await supabase("bot_lessons?order=created_at.desc&limit=20");
     if (Array.isArray(lessons)) BRAIN.lessons = lessons.map(l=>l.lesson).filter(Boolean);
-
-    console.log(`🧠 Memory loaded: ${mem.length} trades | ${((BRAIN.wins/BRAIN.totalTrades)*100).toFixed(0)}% win rate`);
-  } catch(e) { console.log("Fresh start — no memory yet"); }
+    console.log(`🧠 Memory: ${mem.length} trades | ${((BRAIN.wins/BRAIN.totalTrades)*100).toFixed(0)}% WR | $${BRAIN.totalPnL.toFixed(0)} P&L`);
+  } catch(e) { console.log("Memory load failed:", e.message); }
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -388,12 +367,16 @@ const loadMemory = async () => {
 
 const getET = () => new Date(new Date().toLocaleString("en-US",{timeZone:"America/New_York"}));
 const isMarketOpen = () => {
-  const et=getET(); const d=et.getDay(); if(d===0||d===6) return false;
-  const t=et.getHours()*100+et.getMinutes(); return t>=930&&t<1600;
+  const et=getET(),d=et.getDay();
+  if(d===0||d===6) return false;
+  const t=et.getHours()*100+et.getMinutes();
+  return t>=930&&t<1600;
 };
 const isPreMarket = () => {
-  const et=getET(); const d=et.getDay(); if(d===0||d===6) return false;
-  const t=et.getHours()*100+et.getMinutes(); return t>=400&&t<930;
+  const et=getET(),d=et.getDay();
+  if(d===0||d===6) return false;
+  const t=et.getHours()*100+et.getMinutes();
+  return t>=400&&t<930;
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -403,81 +386,62 @@ const isPreMarket = () => {
 const autoTrade = async () => {
   if (!isMarketOpen()&&!isPreMarket()) { console.log("⏸️ Market closed"); return; }
   lastScanTime = new Date().toISOString();
-  console.log("🔍 Fetching top gainers across entire market...");
+  console.log("🔍 Scanning entire market for top gainers...");
 
   try {
-    // 1. Get ALL top gainers from market
     const gainers = await getTopGainers();
-    lastGainers = gainers.slice(0,20);
-    console.log(`📊 Found ${gainers.length} gainers | Top: ${gainers.slice(0,5).map(g=>`${g.ticker}+${g.dp?.toFixed(0)}%`).join(", ")}`);
+    lastGainers   = gainers.slice(0,20);
+    console.log(`📊 ${gainers.length} real gainers | Top: ${gainers.slice(0,5).map(g=>`${g.ticker}+${g.dp?.toFixed(0)}%`).join(", ")}`);
 
-    // 2. Manage existing positions
-    const [positions, account] = await Promise.all([
+    // Manage existing positions
+    const [positions,account] = await Promise.all([
       alpaca("/v2/positions").catch(()=>[]),
       alpaca("/v2/account").catch(()=>null),
     ]);
 
     if (Array.isArray(positions)) {
       for (const pos of positions) {
-        const pct = parseFloat(pos.unrealized_plpc)*100;
-        const sym = pos.symbol;
+        const pct   = parseFloat(pos.unrealized_plpc)*100;
+        const sym   = pos.symbol;
         const entry = openTrades[sym];
-
         if (pct >= CONFIG.PROFIT_TARGET) {
-          console.log(`🎯 PROFIT: ${sym} +${pct.toFixed(1)}%`);
-          await alpaca("/v2/orders",{method:"POST",body:JSON.stringify({
-            symbol:sym,qty:pos.qty,side:"sell",type:"market",time_in_force:"day"})});
-          const t={symbol:sym,pnl:parseFloat(pos.unrealized_pl),pnlPct:pct,
-            entryPrice:pos.avg_entry_price,exitPrice:pos.current_price,
-            reason:entry?.reason||"",setup:entry?.setup||"unknown",
-            exitReason:"PROFIT TARGET",type:"SELL",price:pos.current_price,ts:new Date().toISOString()};
+          console.log(`🎯 PROFIT HIT: ${sym} +${pct.toFixed(1)}%`);
+          await alpaca("/v2/orders",{method:"POST",body:JSON.stringify({symbol:sym,qty:pos.qty,side:"sell",type:"market",time_in_force:"day"})});
+          const t={symbol:sym,pnl:parseFloat(pos.unrealized_pl),pnlPct:pct,entryPrice:pos.avg_entry_price,exitPrice:pos.current_price,reason:entry?.reason||"",setup:entry?.setup||"unknown",exitReason:"PROFIT TARGET",type:"SELL",price:pos.current_price,ts:new Date().toISOString()};
           tradeLog.unshift(t); await learnFromTrade(t); delete openTrades[sym];
         } else if (pct <= -CONFIG.STOP_LOSS) {
-          console.log(`🛑 STOP: ${sym} ${pct.toFixed(1)}%`);
-          await alpaca("/v2/orders",{method:"POST",body:JSON.stringify({
-            symbol:sym,qty:pos.qty,side:"sell",type:"market",time_in_force:"day"})});
-          const t={symbol:sym,pnl:parseFloat(pos.unrealized_pl),pnlPct:pct,
-            entryPrice:pos.avg_entry_price,exitPrice:pos.current_price,
-            reason:entry?.reason||"",setup:entry?.setup||"unknown",
-            exitReason:"STOP LOSS",type:"STOP",price:pos.current_price,ts:new Date().toISOString()};
+          console.log(`🛑 STOP HIT: ${sym} ${pct.toFixed(1)}%`);
+          await alpaca("/v2/orders",{method:"POST",body:JSON.stringify({symbol:sym,qty:pos.qty,side:"sell",type:"market",time_in_force:"day"})});
+          const t={symbol:sym,pnl:parseFloat(pos.unrealized_pl),pnlPct:pct,entryPrice:pos.avg_entry_price,exitPrice:pos.current_price,reason:entry?.reason||"",setup:entry?.setup||"unknown",exitReason:"STOP LOSS",type:"STOP",price:pos.current_price,ts:new Date().toISOString()};
           tradeLog.unshift(t); await learnFromTrade(t); delete openTrades[sym];
         }
       }
     }
 
-    // 3. Find new entries
+    // Find new entries
     const openCount = Array.isArray(positions)?positions.length:0;
-    if (openCount>=CONFIG.MAX_POSITIONS) { console.log("⚠️ Max positions"); return; }
+    if (openCount>=CONFIG.MAX_POSITIONS) { console.log("⚠️ Max positions reached"); return; }
     const cash = account?parseFloat(account.cash):0;
-    if (cash<CONFIG.POSITION_SIZE) { console.log("⚠️ Low cash"); return; }
-    if (!gainers.length) { console.log("⏭️ No qualifying gainers"); return; }
+    if (cash<CONFIG.POSITION_SIZE) { console.log("⚠️ Insufficient cash"); return; }
+    if (!gainers.length) { console.log("⏭️ No qualifying gainers this cycle"); return; }
 
-    // 4. Deep analyze top 8 gainers
-    const top8 = gainers.slice(0,8);
+    // Deep analyze top 8
+    const top8     = gainers.slice(0,8);
     const analyses = await Promise.all(top8.map(g=>analyzeGainer(g.ticker,g.c,g.dp)));
-
-    const candidateStr = analyses.map(a=>
-      `${a.ticker}: $${a.price} +${a.pct?.toFixed(1)}% | Float:${a.float}M | ${a.industry}\n` +
-      `News: ${a.headlines.split("\n")[0]||"no news"}`
+    const candStr  = analyses.map(a=>
+      `${a.ticker}: $${a.price} +${a.pct?.toFixed(1)}% | Float:${a.float}M | ${a.industry}\nNews: ${a.headlines.split("\n")[0]||"no news"}`
     ).join("\n\n");
+    lastAnalysis = candStr;
 
-    lastAnalysis = candidateStr;
-
-    // 5. Ask AI to pick best trades based on analysis
     const verdict = await groq(
-      `TOP MARKET GAINERS RIGHT NOW:\n\n${candidateStr}\n\n` +
-      `Based on catalyst quality, float size, setup type, and my trading history:\n` +
-      `Pick TOP 2 to buy for MAXIMUM profit potential.\n` +
-      `Skip: ${BRAIN.worstTickers.slice(0,5).join(",") || "none"}\n` +
-      `Only conviction ${CONFIG.MIN_CONVICTION}+\n\n` +
-      `Reply ONLY:\nBUY: TICKER | CONVICTION: X | SETUP: type | REASON: one line\n` +
+      `REAL top gainers right now (ONLY use these tickers):\n\n${candStr}\n\n` +
+      `Pick TOP 2 to buy. Conviction ${CONFIG.MIN_CONVICTION}+. Skip: ${BRAIN.worstTickers.slice(0,5).join(",")||"none"}\n\n` +
+      `Reply ONLY in this format:\nBUY: TICKER | CONVICTION: X | SETUP: type | REASON: one line\n` +
       `Setup types: gap_and_go, short_squeeze, catalyst_play, breakout, low_float_spike`,
       400
     );
+    console.log("🤖 AI verdict:", verdict);
 
-    console.log("🤖 AI:", verdict);
-
-    // 6. Execute trades
     const buyLines = verdict.split("\n").filter(l=>l.startsWith("BUY:"));
     const owned    = Array.isArray(positions)?positions.map(p=>p.symbol):[];
     let buys = 0;
@@ -488,36 +452,30 @@ const autoTrade = async () => {
       if (!m) continue;
       const ticker     = m[1].toUpperCase();
       const conviction = parseFloat(m[2]);
-      if (conviction < CONFIG.MIN_CONVICTION) { console.log(`⚠️ ${ticker} conviction too low`); continue; }
+      if (conviction < CONFIG.MIN_CONVICTION) continue;
       if (owned.includes(ticker)) continue;
-      if (BRAIN.worstTickers.includes(ticker)) { console.log(`🚫 Skip ${ticker} — avoid list`); continue; }
+      if (BRAIN.worstTickers.includes(ticker)) { console.log(`🚫 Skip ${ticker}`); continue; }
 
+      // IMPORTANT: only buy if ticker actually came from our real scan
       const gainer = gainers.find(g=>g.ticker===ticker);
-      if (!gainer||gainer.c<=0) continue;
-      const qty = Math.floor(CONFIG.POSITION_SIZE/gainer.c);
-      if (qty<1) continue;
+      if (!gainer||gainer.c<=0) { console.log(`🚫 ${ticker} not in real gainers list — skipping`); continue; }
 
+      const qty    = Math.floor(CONFIG.POSITION_SIZE/gainer.c);
+      if (qty<1) continue;
       const setup  = line.match(/SETUP:\s*([a-z_]+)/i)?.[1]||"unknown";
-      const reason = line.match(/REASON:\s*(.+)/i)?.[1]||"AI top gainer signal";
+      const reason = line.match(/REASON:\s*(.+)/i)?.[1]||"top gainer signal";
 
       console.log(`🚀 BUY ${ticker} x${qty} @ $${gainer.c} | ${setup} | c${conviction}`);
-      const order = await alpaca("/v2/orders",{method:"POST",body:JSON.stringify({
-        symbol:ticker,qty:String(qty),side:"buy",type:"market",time_in_force:"day"})});
+      const order = await alpaca("/v2/orders",{method:"POST",body:JSON.stringify({symbol:ticker,qty:String(qty),side:"buy",type:"market",time_in_force:"day"})});
 
       if (order.id) {
         openTrades[ticker]={reason,setup,time:new Date().toISOString(),conviction};
-        tradeLog.unshift({
-          type:"BUY",symbol:ticker,qty,price:gainer.c,conviction,reason,setup,
-          target:(gainer.c*(1+CONFIG.PROFIT_TARGET/100)).toFixed(2),
-          stop:(gainer.c*(1-CONFIG.STOP_LOSS/100)).toFixed(2),
-          ts:new Date().toISOString(),
-        });
-        await supabase("pulsetrader_trades",{method:"POST",body:JSON.stringify({
-          symbol:ticker,side:"LONG",qty,entry_price:gainer.c,
-          reason:`AUTO[${setup}|c${conviction}]: ${reason}`,
-        })}).catch(()=>{});
+        tradeLog.unshift({type:"BUY",symbol:ticker,qty,price:gainer.c,conviction,reason,setup,target:(gainer.c*(1+CONFIG.PROFIT_TARGET/100)).toFixed(2),stop:(gainer.c*(1-CONFIG.STOP_LOSS/100)).toFixed(2),ts:new Date().toISOString()});
+        await supabase("pulsetrader_trades",{method:"POST",body:JSON.stringify({symbol:ticker,side:"LONG",qty,entry_price:gainer.c,reason:`AUTO[${setup}|c${conviction}]: ${reason}`})}).catch(()=>{});
         buys++;
         console.log(`✅ Order placed: ${ticker}`);
+      } else {
+        console.log(`❌ Order failed ${ticker}:`, order.message||"unknown error");
       }
     }
     if (buys===0) console.log("⏭️ No qualifying buys this cycle");
@@ -532,14 +490,14 @@ const autoTrade = async () => {
 const startAutoTrader = () => {
   if (autoTraderActive) return;
   autoTraderActive = true;
-  console.log("🤖 Auto-trader STARTED");
+  console.log("🤖 Auto-trader STARTED — scanning entire market");
   autoTrade();
   scanInterval = setInterval(autoTrade, CONFIG.SCAN_INTERVAL);
 };
 
 const stopAutoTrader = () => {
   if (scanInterval) clearInterval(scanInterval);
-  autoTraderActive = false; scanInterval = null;
+  autoTraderActive=false; scanInterval=null;
   console.log("⏹️ Auto-trader STOPPED");
 };
 
@@ -582,25 +540,25 @@ app.get("/api/autotrader/status", async (req,res) => {
   });
 });
 
-app.post("/api/autotrader/scan",    async (req,res) => { res.json({message:"Scan triggered"}); autoTrade(); });
+app.post("/api/autotrader/scan",    async (req,res) => { res.json({message:"Scan triggered",ts:new Date().toISOString()}); autoTrade(); });
 app.get( "/api/autotrader/brain",   (_,res) => res.json(BRAIN));
 app.get( "/api/autotrader/gainers", (_,res) => res.json({gainers:lastGainers,analysis:lastAnalysis,ts:lastScanTime}));
 
 app.post("/api/autotrader/sellall", async (req,res) => {
   try {
-    const p=await alpaca("/v2/positions");
-    if (!Array.isArray(p)||!p.length) return res.json({message:"No positions"});
+    const p = await alpaca("/v2/positions");
+    if (!Array.isArray(p)||!p.length) return res.json({message:"No positions to sell"});
     await Promise.all(p.map(x=>alpaca("/v2/orders",{method:"POST",
       body:JSON.stringify({symbol:x.symbol,qty:x.qty,side:"sell",type:"market",time_in_force:"day"})})));
     res.json({message:`Sold ${p.length} positions`});
   } catch(e) { res.status(500).json({error:e.message}); }
 });
 
-// Teach the bot manually
+// Teach the bot
 app.post("/api/teach", async (req,res) => {
   const {tickers,context,instruction}=req.body;
   if (!tickers?.length) return res.status(400).json({error:"tickers required"});
-  const list = Array.isArray(tickers)?tickers:[tickers];
+  const list=Array.isArray(tickers)?tickers:[tickers];
   const lessons=[];
   for (const ticker of list) {
     try {
@@ -613,21 +571,17 @@ app.post("/api/teach", async (req,res) => {
       ]);
       const headlines=Array.isArray(news)?news.slice(0,6).map(n=>`- ${n.headline}`).join("\n"):"No news.";
       const analysis=await groq(
-        `${instruction||"Analyze this stock for trading"}\n\n` +
-        `${ticker.toUpperCase()}: $${quote.c} | +${quote.dp?.toFixed(2)}%\n` +
-        `Float: ${profile.shareOutstanding}M | Industry: ${profile.finnhubIndustry}\n` +
+        `${instruction||"Analyze for trading"}\n\n` +
+        `${ticker.toUpperCase()}: $${quote.c} | +${quote.dp?.toFixed(2)}% | Float:${profile.shareOutstanding}M\n` +
         `${context?"Context: "+context+"\n":""}\nNews:\n${headlines}\n\n` +
-        `1. WHY is it moving? 2. HOW to trade for max profit? 3. Similar patterns to scan for? 4. Key lesson?`,
-        1000
+        `1. WHY moving? 2. HOW to trade for max profit? 3. Pattern to find similar stocks? 4. Key lesson?`,1000
       );
       const lesson=analysis.slice(-150);
       BRAIN.lessons.unshift(lesson);
       BRAIN.lessons=BRAIN.lessons.slice(0,10);
       if (!BRAIN.bestTickers.includes(ticker.toUpperCase())) BRAIN.bestTickers.unshift(ticker.toUpperCase());
       BRAIN.worstTickers=BRAIN.worstTickers.filter(t=>t!==ticker.toUpperCase());
-      await supabase("bot_lessons",{method:"POST",body:JSON.stringify({
-        ticker:ticker.toUpperCase(),lesson,pattern:instruction||"user taught",
-        catalyst:headlines.slice(0,200),taught_by:"user"})}).catch(()=>{});
+      await supabase("bot_lessons",{method:"POST",body:JSON.stringify({ticker:ticker.toUpperCase(),lesson,pattern:instruction||"user taught",catalyst:headlines.slice(0,200),taught_by:"user"})}).catch(()=>{});
       lessons.push({ticker:ticker.toUpperCase(),analysis,lesson});
       console.log(`🎓 Taught: ${ticker}`);
     } catch(e) { lessons.push({ticker,error:e.message}); }
@@ -647,11 +601,11 @@ app.post("/api/chat", async (req,res) => {
       finnhub("/quote?symbol=SPY").catch(()=>null),
       alpaca("/v2/account").catch(()=>null),
     ]);
-    const gainersStr = lastGainers.slice(0,5).map(g=>`${g.ticker}+${g.dp?.toFixed(0)}%`).join(",")||"scanning";
-    const ctx = [
+    const gainersStr=lastGainers.slice(0,5).map(g=>`${g.ticker}+${g.dp?.toFixed(0)}%`).join(",")||"scanning";
+    const ctx=[
       spy?.c?`[SPY $${spy.c} (${spy.dp>0?"+":""}${spy.dp?.toFixed(2)}%)]`:"",
       account?`[Portfolio: $${parseFloat(account.equity).toFixed(0)} | Cash: $${parseFloat(account.cash).toFixed(0)}]`:"",
-      autoTraderActive?`[Bot: RUNNING | Scanning entire market | Top gainers: ${gainersStr}]`:"[Bot: PAUSED]",
+      autoTraderActive?`[Bot: RUNNING | Full market scan | Top gainers: ${gainersStr}]`:"[Bot: PAUSED]",
       BRAIN.totalTrades>0?`[Brain: ${BRAIN.totalTrades} trades | ${((BRAIN.wins/BRAIN.totalTrades)*100).toFixed(0)}% wins | $${BRAIN.totalPnL.toFixed(0)} P&L]`:"",
     ].filter(Boolean).join(" ");
     const last=messages[messages.length-1];
@@ -666,17 +620,25 @@ app.post("/api/chat", async (req,res) => {
 
 app.get("/api/movers", async (req,res) => {
   try {
-    console.log("🔍 Fetching top gainers for movers tab...");
     const gainers = await getTopGainers();
-    lastGainers = gainers.slice(0,20);
+    lastGainers   = gainers.slice(0,20);
+
+    if (!gainers.length) {
+      return res.json({
+        data:"No real gainers found right now. Market may be closed or pre-market activity is low. Check back at 9:30 AM ET.",
+        raw:[],scanned:0,ts:new Date().toISOString(),
+      });
+    }
+
     const analyses = await Promise.all(gainers.slice(0,10).map(g=>analyzeGainer(g.ticker,g.c,g.dp)));
-    const dataStr = analyses.map(a=>
+    const dataStr  = analyses.map(a=>
       `${a.ticker}: $${a.price} +${a.pct?.toFixed(1)}% | Float:${a.float}M | ${a.industry}\nCatalyst: ${a.headlines.split("\n")[0]||"unknown"}`
     ).join("\n\n");
+
     const ai = await groq(
-      `TOP MARKET GAINERS TODAY:\n\n${dataStr}\n\n` +
+      `REAL market gainers (ONLY analyze these — do not invent tickers):\n\n${dataStr}\n\n` +
       `For each: WHY is it moving? HOW to trade for max profit? Conviction 1-10.\n` +
-      `End with your #1 highest conviction trade right now with exact plan.`,1500
+      `End with your #1 highest conviction trade with exact entry/target/stop.`,1500
     );
     res.json({data:ai,raw:gainers.slice(0,20),scanned:gainers.length,ts:new Date().toISOString()});
   } catch(e) { res.status(500).json({error:e.message}); }
@@ -685,9 +647,11 @@ app.get("/api/movers", async (req,res) => {
 app.get("/api/spikes", async (req,res) => {
   try {
     const gainers=await getTopGainers();
+    if (!gainers.length) return res.json({data:"No pre-spike candidates right now.",candidates:[],ts:new Date().toISOString()});
     const early=gainers.filter(g=>g.dp>3&&g.dp<30&&g.c<10).slice(0,8);
-    const str=early.map(g=>`${g.ticker} +${g.dp?.toFixed(1)}% $${g.c}`).join("\n");
-    const ai=await groq(`Early-stage movers:\n${str}\n\nBest 3 to buy NOW before bigger move? Entry, target, stop.`,800);
+    if (!early.length) return res.json({data:"No early-stage movers found. All gainers are already extended.",candidates:[],ts:new Date().toISOString()});
+    const str=early.map(g=>`${g.ticker} +${g.dp?.toFixed(1)}% $${g.c} (REAL DATA)`).join("\n");
+    const ai=await groq(`Real early-stage movers:\n${str}\n\nBest 3 to buy before bigger move? Entry, target, stop, conviction.`,800);
     res.json({data:ai,candidates:early,ts:new Date().toISOString()});
   } catch(e) { res.status(500).json({error:e.message}); }
 });
@@ -707,7 +671,7 @@ app.get("/api/edgar", async (req,res) => {
     const today=new Date().toISOString().split("T")[0];
     const [p,n]=await Promise.all([finnhub(`/stock/profile2?symbol=${ticker.toUpperCase()}`),finnhub(`/company-news?symbol=${ticker.toUpperCase()}&from=${week}&to=${today}`)]);
     const headlines=Array.isArray(n)?n.slice(0,8).map(x=>`- ${x.headline}`).join("\n"):"No news.";
-    const ai=await groq(`${ticker.toUpperCase()} | Float:${p.shareOutstanding}M | Cap:$${p.marketCapitalization}B\nNews:\n${headlines}\n\nCatalyst? Entry, target, stop, conviction.`);
+    const ai=await groq(`${ticker.toUpperCase()} | Float:${p.shareOutstanding}M | Cap:$${p.marketCapitalization}B\nReal news:\n${headlines}\n\nCatalyst quality? Entry, target, stop, conviction.`);
     res.json({ticker:ticker.toUpperCase(),data:ai,ts:new Date().toISOString()});
   } catch(e) { res.status(500).json({error:e.message}); }
 });
@@ -719,7 +683,7 @@ app.get("/api/earnings", async (req,res) => {
     const cal=await finnhub(`/calendar/earnings?from=${today}&to=${next7}`);
     const top=cal?.earningsCalendar?.slice(0,20)||[];
     const list=top.map(e=>`${e.symbol}|${e.date}|EPS:${e.epsEstimate??'N/A'}`).join("\n");
-    const ai=await groq(`Earnings:\n${list}\n\nTop 5 small cap spike plays? Entry, target, stop.`);
+    const ai=await groq(`Real earnings this week:\n${list||"No data"}\n\nTop 5 small cap spike plays? Entry, target, stop.`);
     res.json({calendar:top,ai_summary:ai,ts:new Date().toISOString()});
   } catch(e) { res.status(500).json({error:e.message}); }
 });
@@ -836,9 +800,8 @@ app.delete("/api/trade/:id", async (req,res) => {
 // ════════════════════════════════════════════════════════════════════════════
 
 app.get("/health", (_,res) => res.json({
-  status:"ok",version:"7.0.0",ai:"groq-llama-3.3-70b",mode:"paper",
-  auto_trader:autoTraderActive,
-  scanner:"Alpaca full market + Finnhub",
+  status:"ok",version:"7.1.0",ai:"groq-llama-3.3-70b",mode:"paper",
+  auto_trader:autoTraderActive,scanner:"Alpaca full market + Finnhub (real data only)",
   brain_trades:BRAIN.totalTrades,
   win_rate:BRAIN.totalTrades>0?((BRAIN.wins/BRAIN.totalTrades)*100).toFixed(1)+"%":"learning",
   market_open:isMarketOpen(),ts:new Date().toISOString(),
@@ -853,17 +816,16 @@ app.get("/api/dashboard", async (req,res) => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// START
+// START — auto-boots on every deploy
 // ════════════════════════════════════════════════════════════════════════════
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, async () => {
-  console.log(`⚡ PulseTrader v7.0 FULL MARKET SCANNER on port ${PORT}`);
-  console.log(`   Scanner: Alpaca full market screener + Finnhub`);
-  console.log(`   Finds: ALL top gainers automatically`);
-  console.log(`   Analyzes: WHY they move + how to trade`);
-  console.log(`   Self-learning: yes — improves every trade`);
-  console.log(`   Mode: PAPER TRADING`);
+  console.log(`⚡ PulseTrader v7.1 FULL MARKET SCANNER on port ${PORT}`);
+  console.log(`   Scanner : Alpaca full market screener + Finnhub fallback`);
+  console.log(`   Fix     : Real data only — no hallucinated tickers`);
+  console.log(`   Target  : +${CONFIG.PROFIT_TARGET}% | Stop: -${CONFIG.STOP_LOSS}%`);
+  console.log(`   Mode    : PAPER TRADING`);
   await loadMemory();
   console.log("🤖 Auto-starting trader...");
   startAutoTrader();
