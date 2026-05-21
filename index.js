@@ -49,7 +49,7 @@ const groq = async (prompt, maxTokens = 1024) => {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model:      "llama3-70b-8192",
+        model:      "llama-3.3-70b-versatile",
         max_tokens: maxTokens,
         messages: [
           { role: "system", content: SYSTEM },
@@ -76,7 +76,7 @@ const groqChat = async (messages, maxTokens = 1200) => {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model:      "llama3-70b-8192",
+        model:      "llama-3.3-70b-versatile",
         max_tokens: maxTokens,
         messages:   [{ role: "system", content: SYSTEM }, ...messages],
       }),
