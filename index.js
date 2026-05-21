@@ -1,13 +1,13 @@
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║         PULSETRADER — FINAL BACKEND v3 (GROQ FREE VERSION)              ║
+// ║         PULSETRADER — FINAL BACKEND v3.2 (GROQ FREE VERSION)            ║
 // ║                                                                          ║
 // ║  Render Environment Variables:                                           ║
-// ║    GROQ_API_KEY       → Groq API key (free at console.groq.com)         ║
-// ║    SUPABASE_URL       → https://xxxx.supabase.co                         ║
-// ║    SUPABASE_KEY       → Supabase anon key                                ║
-// ║    ALPACA_KEY         → Alpaca paper key ID                              ║
-// ║    ALPACA_SECRET      → Alpaca paper secret                              ║
-// ║    FINNHUB_KEY        → Finnhub token                                    ║
+// ║    GROQ_API_KEY  → Groq API key (free at console.groq.com)              ║
+// ║    SUPABASE_URL  → https://xxxx.supabase.co                              ║
+// ║    SUPABASE_KEY  → Supabase anon key                                     ║
+// ║    ALPACA_KEY    → Alpaca paper key ID                                   ║
+// ║    ALPACA_SECRET → Alpaca paper secret                                   ║
+// ║    FINNHUB_KEY   → Finnhub token                                         ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
 
 import express from "express";
@@ -20,49 +20,77 @@ app.use(express.json());
 app.use(express.static("public"));
 
 // ════════════════════════════════════════════════════════════════════════════
+// SYSTEM PROMPT — defined first so helpers can reference it
+// ════════════════════════════════════════════════════════════════════════════
+
+const SYSTEM = `You are PulseTrader — a sharp, street-smart AI trading assistant.
+Personality: confident, concise, zero fluff. Talk like a seasoned trader, not a textbook.
+Use emojis sparingly. Only reference data you are given — never fabricate prices or tickers.
+
+You will receive real market data from Finnhub and Alpaca. Analyze it directly.
+
+Formatting rules:
+- Movers   → ticker | % move | one-line catalyst
+- Earnings → ticker | date | EPS est | key thing to watch
+- Analysis → trend → key levels → catalyst → bull/bear lean + reason
+- Always close with one bold actionable takeaway.`;
+
+// ════════════════════════════════════════════════════════════════════════════
 // HELPERS
 // ════════════════════════════════════════════════════════════════════════════
 
-// ── Groq (free, fast LLM) ────────────────────────────────────────────────────
-const groq = async (prompt, system = SYSTEM, maxTokens = 1024) => {
-  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization:  `Bearer ${process.env.GROQ_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model:      "llama3-70b-8192",
-      max_tokens: maxTokens,
-      messages: [
-        { role: "system",  content: system },
-        { role: "user",    content: prompt },
-      ],
-    }),
-  });
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content || "No response.";
+// ── Groq single prompt ───────────────────────────────────────────────────────
+const groq = async (prompt, maxTokens = 1024) => {
+  try {
+    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization:  `Bearer ${process.env.GROQ_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model:      "llama3-70b-8192",
+        max_tokens: maxTokens,
+        messages: [
+          { role: "system", content: SYSTEM },
+          { role: "user",   content: prompt },
+        ],
+      }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error.message);
+    return data.choices?.[0]?.message?.content || "No response.";
+  } catch (err) {
+    console.error("Groq error:", err.message);
+    return `Error: ${err.message}`;
+  }
 };
 
-// ── Groq multi-turn chat ──────────────────────────────────────────────────────
+// ── Groq multi-turn chat ─────────────────────────────────────────────────────
 const groqChat = async (messages, maxTokens = 1200) => {
-  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization:  `Bearer ${process.env.GROQ_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model:      "llama3-70b-8192",
-      max_tokens: maxTokens,
-      messages:   [{ role: "system", content: SYSTEM }, ...messages],
-    }),
-  });
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content || "No response.";
+  try {
+    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization:  `Bearer ${process.env.GROQ_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model:      "llama3-70b-8192",
+        max_tokens: maxTokens,
+        messages:   [{ role: "system", content: SYSTEM }, ...messages],
+      }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error.message);
+    return data.choices?.[0]?.message?.content || "No response.";
+  } catch (err) {
+    console.error("GroqChat error:", err.message);
+    return `Error: ${err.message}`;
+  }
 };
 
-// ── Supabase ──────────────────────────────────────────────────────────────────
+// ── Supabase ─────────────────────────────────────────────────────────────────
 const supabase = async (path, opts = {}) => {
   const res = await fetch(`${process.env.SUPABASE_URL}/rest/v1/${path}`, {
     headers: {
@@ -77,7 +105,7 @@ const supabase = async (path, opts = {}) => {
   return text ? JSON.parse(text) : [];
 };
 
-// ── Alpaca Paper Trading ──────────────────────────────────────────────────────
+// ── Alpaca Paper Trading ─────────────────────────────────────────────────────
 const alpaca = async (path, opts = {}) => {
   const res = await fetch(`https://paper-api.alpaca.markets${path}`, {
     headers: {
@@ -100,7 +128,7 @@ const alpacaData = async (path) => {
   return res.json();
 };
 
-// ── Finnhub ───────────────────────────────────────────────────────────────────
+// ── Finnhub ──────────────────────────────────────────────────────────────────
 const finnhub = async (path) => {
   const sep = path.includes("?") ? "&" : "?";
   const res = await fetch(
@@ -110,22 +138,6 @@ const finnhub = async (path) => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// SYSTEM PROMPT
-// ════════════════════════════════════════════════════════════════════════════
-
-const SYSTEM = `You are PulseTrader — a sharp, street-smart AI trading assistant.
-Personality: confident, concise, zero fluff. Talk like a seasoned trader, not a textbook.
-Use emojis sparingly. Only reference data you are given — never fabricate prices or tickers.
-
-You will receive real market data from Finnhub and Alpaca. Analyze it directly.
-
-Formatting rules:
-- Movers   → ticker | % move | one-line catalyst
-- Earnings → ticker | date | EPS est | key thing to watch
-- Analysis → trend → key levels → catalyst → bull/bear lean + reason
-- Always close with one bold actionable takeaway.`;
-
-// ════════════════════════════════════════════════════════════════════════════
 // AI CHAT
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -133,17 +145,16 @@ app.post("/api/chat", async (req, res) => {
   const { messages } = req.body;
   if (!messages?.length) return res.status(400).json({ error: "No messages" });
   try {
-    // Inject live market context into chat
     const spy = await finnhub("/quote?symbol=SPY").catch(() => null);
     const qqq = await finnhub("/quote?symbol=QQQ").catch(() => null);
-    const context = spy ? `\n[Live: SPY $${spy.c} (${spy.dp > 0 ? "+" : ""}${spy.dp}%), QQQ $${qqq?.c} (${qqq?.dp > 0 ? "+" : ""}${qqq?.dp}%)]` : "";
-
-    const lastMsg = messages[messages.length - 1];
-    const enriched = [...messages.slice(0, -1), {
-      ...lastMsg,
-      content: lastMsg.content + context,
-    }];
-
+    const context = spy?.c
+      ? `\n[Live market: SPY $${spy.c} (${spy.dp > 0 ? "+" : ""}${spy.dp}%), QQQ $${qqq?.c} (${qqq?.dp > 0 ? "+" : ""}${qqq?.dp}%)]`
+      : "";
+    const lastMsg  = messages[messages.length - 1];
+    const enriched = [
+      ...messages.slice(0, -1),
+      { ...lastMsg, content: lastMsg.content + context },
+    ];
     const reply = await groqChat(enriched);
     res.json({ reply });
   } catch (err) {
@@ -153,19 +164,18 @@ app.post("/api/chat", async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// MARKET DATA (Finnhub → Groq analysis)
+// MARKET DATA
 // ════════════════════════════════════════════════════════════════════════════
 
-// ── GET /api/movers ───────────────────────────────────────────────────────────
 app.get("/api/movers", async (req, res) => {
   try {
-    // Pull quotes for top watchlist tickers
     const tickers = ["NVDA","TSLA","AAPL","META","AMZN","MSFT","GOOGL","COIN","PLTR","SOFI","AMD","SPY","QQQ"];
-    const quotes = await Promise.all(
+    const quotes  = await Promise.all(
       tickers.map(t => finnhub(`/quote?symbol=${t}`).then(q => ({ ticker: t, ...q })).catch(() => null))
     );
-    const valid = quotes.filter(q => q && q.c > 0);
-    const sorted = valid.sort((a, b) => Math.abs(b.dp) - Math.abs(a.dp));
+    const sorted = quotes
+      .filter(q => q && q.c > 0)
+      .sort((a, b) => Math.abs(b.dp) - Math.abs(a.dp));
 
     const data = sorted.map(q =>
       `${q.ticker}: $${q.c} | ${q.dp > 0 ? "+" : ""}${q.dp?.toFixed(2)}% | H:$${q.h} L:$${q.l}`
@@ -173,18 +183,16 @@ app.get("/api/movers", async (req, res) => {
 
     const analysis = await groq(
       `Here are today's top movers by % change:\n${data}\n\n` +
-      `Format as: 🟢 GAINERS and 🔴 LOSERS sections. ` +
-      `For each: ticker | % move | one-line reason why it might be moving. ` +
+      `Format as 🟢 GAINERS and 🔴 LOSERS. ` +
+      `For each: ticker | % move | one-line reason. ` +
       `End with one actionable trade idea.`
     );
-
     res.json({ data: analysis, raw: sorted, ts: new Date().toISOString() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── GET /api/quote?ticker=NVDA ────────────────────────────────────────────────
 app.get("/api/quote", async (req, res) => {
   const { ticker = "SPY" } = req.query;
   try {
@@ -193,16 +201,9 @@ app.get("/api/quote", async (req, res) => {
       finnhub(`/stock/profile2?symbol=${ticker.toUpperCase()}`),
     ]);
     res.json({
-      ticker:     ticker.toUpperCase(),
-      price:      quote.c,
-      change:     quote.d,
-      pct:        quote.dp,
-      high:       quote.h,
-      low:        quote.l,
-      open:       quote.o,
-      prev:       quote.pc,
-      name:       profile.name,
-      industry:   profile.finnhubIndustry,
+      ticker, price: quote.c, change: quote.d, pct: quote.dp,
+      high: quote.h, low: quote.l, open: quote.o, prev: quote.pc,
+      name: profile.name, industry: profile.finnhubIndustry,
       market_cap: profile.marketCapitalization,
     });
   } catch (err) {
@@ -210,103 +211,78 @@ app.get("/api/quote", async (req, res) => {
   }
 });
 
-// ── GET /api/edgar?ticker=NVDA ────────────────────────────────────────────────
 app.get("/api/edgar", async (req, res) => {
   const { ticker = "NVDA" } = req.query;
   try {
+    const week = new Date(Date.now() - 7 * 86400000).toISOString().split("T")[0];
+    const today = new Date().toISOString().split("T")[0];
     const [profile, news] = await Promise.all([
       finnhub(`/stock/profile2?symbol=${ticker.toUpperCase()}`),
-      finnhub(`/company-news?symbol=${ticker.toUpperCase()}&from=${
-        new Date(Date.now()-7*86400000).toISOString().split("T")[0]
-      }&to=${new Date().toISOString().split("T")[0]}`),
+      finnhub(`/company-news?symbol=${ticker.toUpperCase()}&from=${week}&to=${today}`),
     ]);
-
     const headlines = Array.isArray(news)
       ? news.slice(0, 8).map(n => `- ${n.headline}`).join("\n")
-      : "No recent news found.";
-
+      : "No recent news.";
     const analysis = await groq(
       `Company: ${profile.name || ticker} (${ticker.toUpperCase()})\n` +
       `Industry: ${profile.finnhubIndustry || "Unknown"}\n` +
       `Market Cap: $${profile.marketCapitalization}B\n\n` +
       `Recent headlines:\n${headlines}\n\n` +
-      `Summarize the 3 most important things an investor needs to know about ` +
-      `${ticker.toUpperCase()} right now. Focus on risks, catalysts, and key financials. Be direct.`
+      `Summarize the 3 most important things an investor needs to know right now. ` +
+      `Focus on risks, catalysts, and financials. Be direct.`
     );
-
     res.json({ ticker: ticker.toUpperCase(), data: analysis, ts: new Date().toISOString() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── GET /api/earnings ─────────────────────────────────────────────────────────
 app.get("/api/earnings", async (req, res) => {
   try {
     const today = new Date().toISOString().split("T")[0];
     const next7 = new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0];
     const calendar = await finnhub(`/calendar/earnings?from=${today}&to=${next7}`);
-
-    const top = calendar?.earningsCalendar?.slice(0, 15) || [];
+    const top  = calendar?.earningsCalendar?.slice(0, 15) || [];
     const list = top.map(e =>
-      `${e.symbol} | ${e.date} | EPS est: ${e.epsEstimate ?? "N/A"} | Rev est: ${e.revenueEstimate ? "$"+e.revenueEstimate+"B" : "N/A"}`
+      `${e.symbol} | ${e.date} | EPS est: ${e.epsEstimate ?? "N/A"} | Rev: ${e.revenueEstimate ? "$" + e.revenueEstimate + "B" : "N/A"}`
     ).join("\n");
-
     const analysis = await groq(
-      `This week's earnings calendar:\n${list || "No data available."}\n\n` +
-      `Pick the top 5 most market-moving reports. For each: ticker | date | EPS est | ` +
-      `one key thing to watch. End with which one you'd trade and why.`
+      `This week's earnings:\n${list || "No data."}\n\n` +
+      `Pick the top 5 most market-moving. For each: ticker | date | EPS est | key thing to watch. ` +
+      `End with which one you'd trade and why.`
     );
-
-    res.json({
-      calendar: top,
-      ai_summary: analysis,
-      ts: new Date().toISOString(),
-    });
+    res.json({ calendar: top, ai_summary: analysis, ts: new Date().toISOString() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── GET /api/analyze?ticker=TSLA ─────────────────────────────────────────────
 app.get("/api/analyze", async (req, res) => {
   const { ticker = "SPY" } = req.query;
   try {
+    const week  = new Date(Date.now() - 7 * 86400000).toISOString().split("T")[0];
+    const today = new Date().toISOString().split("T")[0];
     const [quote, profile, news] = await Promise.all([
       finnhub(`/quote?symbol=${ticker.toUpperCase()}`),
       finnhub(`/stock/profile2?symbol=${ticker.toUpperCase()}`),
-      finnhub(`/company-news?symbol=${ticker.toUpperCase()}&from=${
-        new Date(Date.now()-7*86400000).toISOString().split("T")[0]
-      }&to=${new Date().toISOString().split("T")[0]}`),
+      finnhub(`/company-news?symbol=${ticker.toUpperCase()}&from=${week}&to=${today}`),
     ]);
-
     const headlines = Array.isArray(news)
-      ? news.slice(0, 6).map(n => `- ${n.headline}`).join("\n")
-      : "";
-
+      ? news.slice(0, 6).map(n => `- ${n.headline}`).join("\n") : "";
     const analysis = await groq(
-      `Analyze ${ticker.toUpperCase()} for a trade setup.\n\n` +
-      `Price data: Current $${quote.c} | Open $${quote.o} | High $${quote.h} | Low $${quote.l} | Prev close $${quote.pc} | Change ${quote.dp?.toFixed(2)}%\n` +
-      `Company: ${profile.name} | Industry: ${profile.finnhubIndustry}\n\n` +
-      `Recent news:\n${headlines}\n\n` +
-      `Give: (1) current trend/setup, (2) key price levels to watch, ` +
-      `(3) upcoming catalysts, (4) bull or bear lean and exactly why. No fluff.`,
+      `Analyze ${ticker.toUpperCase()} for a trade.\n\n` +
+      `Price: $${quote.c} | Open $${quote.o} | H $${quote.h} | L $${quote.l} | Prev $${quote.pc} | ${quote.dp?.toFixed(2)}%\n` +
+      `${profile.name} | ${profile.finnhubIndustry}\n\n` +
+      `News:\n${headlines}\n\n` +
+      `Give: (1) trend/setup (2) key levels (3) catalysts (4) bull/bear lean + why. No fluff.`,
       1000
     );
-
-    res.json({
-      ticker:   ticker.toUpperCase(),
-      price:    quote.c,
-      change:   quote.dp,
-      analysis,
-      ts:       new Date().toISOString(),
-    });
+    res.json({ ticker: ticker.toUpperCase(), price: quote.c, change: quote.dp, analysis, ts: new Date().toISOString() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── GET /api/news ─────────────────────────────────────────────────────────────
 app.get("/api/news", async (req, res) => {
   const { ticker } = req.query;
   try {
@@ -327,17 +303,17 @@ app.get("/api/news", async (req, res) => {
 
 app.get("/api/account", async (req, res) => {
   try {
-    const data     = await alpaca("/v2/account");
-    const todayPnL = parseFloat(data.equity) - parseFloat(data.last_equity);
+    const d = await alpaca("/v2/account");
+    const pnl = parseFloat(d.equity) - parseFloat(d.last_equity);
     res.json({
-      equity:          parseFloat(data.equity).toFixed(2),
-      cash:            parseFloat(data.cash).toFixed(2),
-      buying_power:    parseFloat(data.buying_power).toFixed(2),
-      portfolio_value: parseFloat(data.portfolio_value).toFixed(2),
-      pnl_today:       todayPnL.toFixed(2),
-      pnl_today_pct:   ((todayPnL / parseFloat(data.last_equity)) * 100).toFixed(2) + "%",
-      day_trade_count: data.daytrade_count,
-      status:          data.status,
+      equity:          parseFloat(d.equity).toFixed(2),
+      cash:            parseFloat(d.cash).toFixed(2),
+      buying_power:    parseFloat(d.buying_power).toFixed(2),
+      portfolio_value: parseFloat(d.portfolio_value).toFixed(2),
+      pnl_today:       pnl.toFixed(2),
+      pnl_today_pct:   ((pnl / parseFloat(d.last_equity)) * 100).toFixed(2) + "%",
+      day_trade_count: d.daytrade_count,
+      status:          d.status,
       paper:           true,
     });
   } catch (err) {
@@ -435,13 +411,10 @@ app.get("/api/pnl", async (req, res) => {
         total_pnl:    total.toFixed(2),
         avg_pnl:      closed.length ? (total / closed.length).toFixed(2) : "0.00",
         win_rate:     closed.length ? ((winners / closed.length) * 100).toFixed(1) + "%" : "0%",
-        total_trades: trades.length,
-        closed:       closed.length,
-        open:         open.length,
-        winners,
-        losers:       closed.length - winners,
-        best_trade:   best  ? { symbol: best.symbol,  pnl: best.pnl  } : null,
-        worst_trade:  worst ? { symbol: worst.symbol, pnl: worst.pnl } : null,
+        total_trades: trades.length, closed: closed.length, open: open.length,
+        winners, losers: closed.length - winners,
+        best_trade:  best  ? { symbol: best.symbol,  pnl: best.pnl  } : null,
+        worst_trade: worst ? { symbol: worst.symbol, pnl: worst.pnl } : null,
       },
       recent:         trades.slice(0, 15),
       open_positions: open,
@@ -462,9 +435,8 @@ app.get("/api/trades", async (req, res) => {
 
 app.post("/api/trade", async (req, res) => {
   const { symbol, side, qty, entry_price, exit_price, reason } = req.body;
-  if (!symbol || !side || !qty || !entry_price) {
+  if (!symbol || !side || !qty || !entry_price)
     return res.status(400).json({ error: "symbol, side, qty, entry_price required" });
-  }
   let pnl = null, pnl_pct = null;
   if (exit_price) {
     const dir = side.toUpperCase() === "SHORT" ? -1 : 1;
@@ -565,7 +537,7 @@ app.get("/api/dashboard", async (req, res) => {
 });
 
 app.get("/health", (_, res) =>
-  res.json({ status: "ok", version: "3.1.0", ai: "groq-llama3-70b", mode: "paper", ts: new Date().toISOString() })
+  res.json({ status: "ok", version: "3.2.0", ai: "groq-llama3-70b", mode: "paper", ts: new Date().toISOString() })
 );
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -574,9 +546,8 @@ app.get("/health", (_, res) =>
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`⚡ PulseTrader v3.1 LIVE on port ${PORT}`);
+  console.log(`⚡ PulseTrader v3.2 LIVE on port ${PORT}`);
   console.log(`   AI    : Groq LLaMA3-70B (FREE)`);
   console.log(`   Mode  : PAPER TRADING`);
-  console.log(`   Routes: /api/chat /api/holdings /api/account /api/pnl`);
-  console.log(`           /api/movers /api/edgar /api/earnings /api/analyze`);
+  console.log(`   Fix   : SYSTEM prompt moved above helpers`);
 });
