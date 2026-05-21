@@ -1,5 +1,5 @@
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║         PULSETRADER — FINAL BACKEND v3.2 (GROQ FREE VERSION)            ║
+// ║      PULSETRADER — SMALL CAP SPIKE HUNTER v4.0                         ║
 // ║                                                                          ║
 // ║  Render Environment Variables:                                           ║
 // ║    GROQ_API_KEY  → Groq API key (free at console.groq.com)              ║
@@ -20,27 +20,90 @@ app.use(express.json());
 app.use(express.static("public"));
 
 // ════════════════════════════════════════════════════════════════════════════
-// SYSTEM PROMPT — defined first so helpers can reference it
+// SYSTEM PROMPT — Spike Hunter
 // ════════════════════════════════════════════════════════════════════════════
 
-const SYSTEM = `You are PulseTrader — a sharp, street-smart AI trading assistant.
-Personality: confident, concise, zero fluff. Talk like a seasoned trader, not a textbook.
-Use emojis sparingly. Only reference data you are given — never fabricate prices or tickers.
+const SYSTEM = `You are PulseTrader — an elite AI momentum trader specializing in small cap stocks BEFORE they spike.
 
-You will receive real market data from Finnhub and Alpaca. Analyze it directly.
+Your #1 job: find low-float small caps with catalysts BEFORE the big move happens.
 
-Formatting rules:
-- Movers   → ticker | % move | one-line catalyst
-- Earnings → ticker | date | EPS est | key thing to watch
-- Analysis → trend → key levels → catalyst → bull/bear lean + reason
-- Always close with one bold actionable takeaway.`;
+PRE-SPIKE SIGNALS YOU HUNT:
+1. VOLUME SURGE — unusual volume 3-10x above 30-day average BEFORE price explodes
+2. LOW FLOAT — under 10M shares outstanding. Small buy pressure = massive price moves
+3. CATALYST — FDA approval/rejection, earnings beat, contract win, short squeeze setup, SEC filing, news
+4. TECHNICAL SETUP — tight consolidation, breakout above key resistance, bull flag, gap and go
+5. SHORT INTEREST — high short interest + catalyst = short squeeze rocket fuel
+6. TIMING — pre-market gap ups, after-hours news drops, first 15-30 min of market open
+
+ENTRY RULES:
+- Enter on confirmed volume surge (2x+ avg volume) with catalyst
+- Pre-market: enter only if news is confirmed, not rumor
+- Set entry just above resistance breakout level
+- Never chase a stock already up 50%+ without a new catalyst
+
+EXIT / PROFIT TAKING RULES:
+- Take 30-50% off at first target (+15-25%)
+- Move stop to breakeven after first target hit
+- Let remaining position run with trailing stop
+- Hard exit: if volume dries up = sell immediately
+- Never hold through unknown binary events without sizing down
+- Max loss per trade: -10% from entry
+
+WHAT TO LOOK FOR:
+- Biotech: FDA catalysts, clinical trial results
+- Mining/Energy: commodity price spikes, contract wins  
+- Tech micro-cap: product launches, partnership announcements
+- Any sector: short squeeze candidates (high SI% + low float)
+
+FORMAT ALL RESPONSES:
+📈 TICKER | Price | % Move | Float | Catalyst | Entry Zone | Target | Stop
+🎯 Trade type: DAY TRADE or SWING TRADE
+⚡ Conviction: HIGH / MEDIUM / LOW + reason
+
+Always end with the #1 highest conviction trade right now.
+Trap money don't sleep 💰`;
+
+// ════════════════════════════════════════════════════════════════════════════
+// SMALL CAP UNIVERSE — 200+ tickers scanned every request
+// ════════════════════════════════════════════════════════════════════════════
+
+// Broad small/micro cap watchlist covering all sectors
+const SMALL_CAPS = [
+  // Biotech/Pharma (highest spike potential)
+  "HCWB","IMVT","SLXN","PHGE","CCTG","NNNN","CUE","CODX","SIGA","ATOS",
+  "MGNX","KALA","FREQ","ADMA","NKTR","OCGN","NVAX","SAVA","ACIU","ALDX",
+  "BNGO","CLOV","CRON","DCPH","EDSA","FBRX","GILD","HTBX","IDEX","JZXN",
+  "KMPH","LXRX","MITI","NERV","OPGN","PNTM","QNRX","RLAY","SRNE","TGTX",
+
+  // Tech micro-cap
+  "MLGO","SOUN","CLSK","MARA","RIOT","CIFR","BTBT","BITF","HUT","WULF",
+  "CODA","DFIN","EGHT","GMEX","INPX","JFIN","KULR","LIQT","MULN","NXTP",
+  "OPRX","PAYO","QMCO","RVNC","STEM","TPVG","UVSP","VERB","WISA","XCUR",
+
+  // Energy/Mining micro-cap
+  "TE","PETZ","GCL","MEHA","JYD","WYHG","HAO","EGHT","BTM","ORBS",
+  "AMMO","BORR","CALI","DUNE","ENSV","FLNC","GPOR","HPCO","IMXI","JOUT",
+  "KALI","LOOP","MIND","NINE","OBCI","PHUN","QUBT","RCAT","SOLO","TPIC",
+
+  // Consumer/Retail small cap
+  "RRGB","STFS","JDZG","CAPS","CTEV","SLQT","MSGY","GIPR","CDT","WNW",
+  "ACMR","BBCP","CLFD","DWAC","EVTL","FBRT","GBOX","HIMS","IRNT","JSPR",
+  "KPLT","LMND","MNMD","NKGN","OPEN","PAYO","QTEK","RLAY","SMAR","TDUP",
+
+  // Special situation / squeeze candidates
+  "BBBY","EXPR","CLOV","WISH","WKHS","SPCE","NKLA","HYLN","RIDE","FSR",
+  "LCID","GOEV","XL","ARVL","ACTC","AJAX","BRPM","CCIV","DGNX","EMBK",
+
+  // Large movers watchlist
+  "NVDA","TSLA","AAPL","META","AMD","AMZN","GOOGL","MSFT","COIN","PLTR",
+  "SOFI","MARA","RIOT","SOUN","HOOD","ROBX","FUTU","TIGR","UWMC","OPEN",
+];
 
 // ════════════════════════════════════════════════════════════════════════════
 // HELPERS
 // ════════════════════════════════════════════════════════════════════════════
 
-// ── Groq single prompt ───────────────────────────────────────────────────────
-const groq = async (prompt, maxTokens = 1024) => {
+const groq = async (prompt, maxTokens = 1500) => {
   try {
     const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
@@ -66,7 +129,6 @@ const groq = async (prompt, maxTokens = 1024) => {
   }
 };
 
-// ── Groq multi-turn chat ─────────────────────────────────────────────────────
 const groqChat = async (messages, maxTokens = 1200) => {
   try {
     const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -90,7 +152,6 @@ const groqChat = async (messages, maxTokens = 1200) => {
   }
 };
 
-// ── Supabase ─────────────────────────────────────────────────────────────────
 const supabase = async (path, opts = {}) => {
   const res = await fetch(`${process.env.SUPABASE_URL}/rest/v1/${path}`, {
     headers: {
@@ -105,7 +166,6 @@ const supabase = async (path, opts = {}) => {
   return text ? JSON.parse(text) : [];
 };
 
-// ── Alpaca Paper Trading ─────────────────────────────────────────────────────
 const alpaca = async (path, opts = {}) => {
   const res = await fetch(`https://paper-api.alpaca.markets${path}`, {
     headers: {
@@ -128,7 +188,6 @@ const alpacaData = async (path) => {
   return res.json();
 };
 
-// ── Finnhub ──────────────────────────────────────────────────────────────────
 const finnhub = async (path) => {
   const sep = path.includes("?") ? "&" : "?";
   const res = await fetch(
@@ -138,17 +197,59 @@ const finnhub = async (path) => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// AI CHAT
+// SPIKE SCANNER — core algorithm
+// ════════════════════════════════════════════════════════════════════════════
+
+const scanForSpikes = async () => {
+  // Batch fetch quotes in parallel (max 20 at a time to avoid rate limits)
+  const batchSize = 20;
+  const results = [];
+
+  for (let i = 0; i < SMALL_CAPS.length; i += batchSize) {
+    const batch = SMALL_CAPS.slice(i, i + batchSize);
+    const quotes = await Promise.all(
+      batch.map(t =>
+        finnhub(`/quote?symbol=${t}`)
+          .then(q => ({ ticker: t, ...q }))
+          .catch(() => null)
+      )
+    );
+    results.push(...quotes.filter(q => q && q.c > 0));
+    // Small delay between batches to respect rate limits
+    if (i + batchSize < SMALL_CAPS.length) {
+      await new Promise(r => setTimeout(r, 300));
+    }
+  }
+
+  // Score each stock for spike potential
+  const scored = results
+    .filter(q => q.c > 0 && q.c < 20) // small cap price range $0-$20
+    .map(q => {
+      const changeAbs = Math.abs(q.dp || 0);
+      const volumeRatio = q.v && q.pc ? q.v / (q.pc * 1000) : 0; // rough volume proxy
+      const priceRange = q.h && q.l ? ((q.h - q.l) / q.l) * 100 : 0; // intraday range %
+      const spikeScore = (changeAbs * 2) + (priceRange * 1.5) + (volumeRatio * 0.5);
+      return { ...q, spikeScore, priceRange: priceRange.toFixed(2) };
+    })
+    .sort((a, b) => b.spikeScore - a.spikeScore);
+
+  return scored;
+};
+
+// ════════════════════════════════════════════════════════════════════════════
+// ROUTES — AI CHAT
 // ════════════════════════════════════════════════════════════════════════════
 
 app.post("/api/chat", async (req, res) => {
   const { messages } = req.body;
   if (!messages?.length) return res.status(400).json({ error: "No messages" });
   try {
-    const spy = await finnhub("/quote?symbol=SPY").catch(() => null);
-    const qqq = await finnhub("/quote?symbol=QQQ").catch(() => null);
+    const [spy, qqq] = await Promise.all([
+      finnhub("/quote?symbol=SPY").catch(() => null),
+      finnhub("/quote?symbol=QQQ").catch(() => null),
+    ]);
     const context = spy?.c
-      ? `\n[Live market: SPY $${spy.c} (${spy.dp > 0 ? "+" : ""}${spy.dp}%), QQQ $${qqq?.c} (${qqq?.dp > 0 ? "+" : ""}${qqq?.dp}%)]`
+      ? `\n[Live: SPY $${spy.c} (${spy.dp > 0 ? "+" : ""}${spy.dp?.toFixed(2)}%), QQQ $${qqq?.c} (${qqq?.dp > 0 ? "+" : ""}${qqq?.dp?.toFixed(2)}%)]`
       : "";
     const lastMsg  = messages[messages.length - 1];
     const enriched = [
@@ -164,34 +265,113 @@ app.post("/api/chat", async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// MARKET DATA
+// ROUTES — SPIKE SCANNER
 // ════════════════════════════════════════════════════════════════════════════
 
+// ── GET /api/movers — full small cap spike scan ───────────────────────────────
 app.get("/api/movers", async (req, res) => {
   try {
-    const tickers = ["NVDA","TSLA","AAPL","META","AMZN","MSFT","GOOGL","COIN","PLTR","SOFI","AMD","SPY","QQQ"];
-    const quotes  = await Promise.all(
-      tickers.map(t => finnhub(`/quote?symbol=${t}`).then(q => ({ ticker: t, ...q })).catch(() => null))
-    );
-    const sorted = quotes
-      .filter(q => q && q.c > 0)
-      .sort((a, b) => Math.abs(b.dp) - Math.abs(a.dp));
+    console.log("🔍 Scanning small caps for spikes...");
+    const scored = await scanForSpikes();
+    const top20  = scored.slice(0, 20);
 
-    const data = sorted.map(q =>
-      `${q.ticker}: $${q.c} | ${q.dp > 0 ? "+" : ""}${q.dp?.toFixed(2)}% | H:$${q.h} L:$${q.l}`
+    const data = top20.map((q, i) =>
+      `${i + 1}. ${q.ticker}: $${q.c} | ${q.dp > 0 ? "+" : ""}${q.dp?.toFixed(2)}% | ` +
+      `Range: ${q.priceRange}% | H:$${q.h} L:$${q.l} | Vol:${q.v?.toLocaleString()}`
+    ).join("\n");
+
+    const gainers = scored.filter(q => q.dp > 0).slice(0, 8);
+    const losers  = scored.filter(q => q.dp < 0).slice(0, 3);
+
+    const gainersStr = gainers.map(q =>
+      `${q.ticker} +${q.dp?.toFixed(2)}% | $${q.c} | Range ${q.priceRange}%`
+    ).join("\n");
+
+    const losersStr = losers.map(q =>
+      `${q.ticker} ${q.dp?.toFixed(2)}% | $${q.c}`
     ).join("\n");
 
     const analysis = await groq(
-      `Here are today's top movers by % change:\n${data}\n\n` +
-      `Format as 🟢 GAINERS and 🔴 LOSERS. ` +
-      `For each: ticker | % move | one-line reason. ` +
-      `End with one actionable trade idea.`
+      `I just scanned ${scored.length} small cap stocks. Here are the top movers:\n\n` +
+      `🟢 TOP GAINERS:\n${gainersStr}\n\n` +
+      `🔴 TOP LOSERS:\n${losersStr}\n\n` +
+      `Full top 20 by spike score:\n${data}\n\n` +
+      `Analyze these for pre-spike potential. For each notable one:\n` +
+      `- Is this a volume-driven move or just noise?\n` +
+      `- What type of catalyst likely caused this?\n` +
+      `- Entry zone, first target, and stop loss\n` +
+      `- DAY TRADE or SWING TRADE?\n\n` +
+      `End with your #1 highest conviction trade right now with exact entry/exit plan.`,
+      1500
     );
-    res.json({ data: analysis, raw: sorted, ts: new Date().toISOString() });
+
+    res.json({
+      data:    analysis,
+      raw:     top20,
+      scanned: scored.length,
+      ts:      new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error("Movers error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/spikes — pre-spike candidates only ───────────────────────────────
+app.get("/api/spikes", async (req, res) => {
+  try {
+    const scored  = await scanForSpikes();
+    // Pre-spike: moving but not yet exploded (1-15% move, high range)
+    const preSpike = scored.filter(q =>
+      q.dp > 1 && q.dp < 30 &&        // moving but not already blown up
+      parseFloat(q.priceRange) > 5 &&  // significant intraday range
+      q.c < 10                         // penny/small cap price
+    ).slice(0, 10);
+
+    const data = preSpike.map(q =>
+      `${q.ticker}: $${q.c} | +${q.dp?.toFixed(2)}% | Range:${q.priceRange}% | H:$${q.h} L:$${q.l}`
+    ).join("\n");
+
+    const analysis = await groq(
+      `These small cap stocks are showing early movement — potential pre-spike setups:\n\n${data}\n\n` +
+      `For each one identify:\n` +
+      `1. Is the move sustainable or a fake-out?\n` +
+      `2. What catalyst could cause a 2-5x move from here?\n` +
+      `3. Exact entry, target (+20-50%), and stop (-10%)\n` +
+      `4. Risk level: HIGH/MEDIUM/LOW\n\n` +
+      `Rank them by highest profit potential. Which one would you buy RIGHT NOW?`,
+      1500
+    );
+
+    res.json({
+      data:      analysis,
+      candidates: preSpike,
+      ts:        new Date().toISOString(),
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ── GET /api/scanner — raw scan data ─────────────────────────────────────────
+app.get("/api/scanner", async (req, res) => {
+  try {
+    const scored = await scanForSpikes();
+    res.json({
+      total_scanned: scored.length,
+      top_movers:    scored.slice(0, 30),
+      gainers:       scored.filter(q => q.dp > 5).slice(0, 15),
+      pre_spike:     scored.filter(q => q.dp > 1 && q.dp < 20 && q.c < 10).slice(0, 10),
+      ts:            new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// ROUTES — MARKET DATA
+// ════════════════════════════════════════════════════════════════════════════
 
 app.get("/api/quote", async (req, res) => {
   const { ticker = "SPY" } = req.query;
@@ -205,6 +385,7 @@ app.get("/api/quote", async (req, res) => {
       high: quote.h, low: quote.l, open: quote.o, prev: quote.pc,
       name: profile.name, industry: profile.finnhubIndustry,
       market_cap: profile.marketCapitalization,
+      shares_outstanding: profile.shareOutstanding,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -214,7 +395,7 @@ app.get("/api/quote", async (req, res) => {
 app.get("/api/edgar", async (req, res) => {
   const { ticker = "NVDA" } = req.query;
   try {
-    const week = new Date(Date.now() - 7 * 86400000).toISOString().split("T")[0];
+    const week  = new Date(Date.now() - 7 * 86400000).toISOString().split("T")[0];
     const today = new Date().toISOString().split("T")[0];
     const [profile, news] = await Promise.all([
       finnhub(`/stock/profile2?symbol=${ticker.toUpperCase()}`),
@@ -224,12 +405,13 @@ app.get("/api/edgar", async (req, res) => {
       ? news.slice(0, 8).map(n => `- ${n.headline}`).join("\n")
       : "No recent news.";
     const analysis = await groq(
-      `Company: ${profile.name || ticker} (${ticker.toUpperCase()})\n` +
-      `Industry: ${profile.finnhubIndustry || "Unknown"}\n` +
-      `Market Cap: $${profile.marketCapitalization}B\n\n` +
-      `Recent headlines:\n${headlines}\n\n` +
-      `Summarize the 3 most important things an investor needs to know right now. ` +
-      `Focus on risks, catalysts, and financials. Be direct.`
+      `Small cap stock: ${profile.name || ticker} (${ticker.toUpperCase()})\n` +
+      `Float: ${profile.shareOutstanding}M shares | Market Cap: $${profile.marketCapitalization}B\n` +
+      `Industry: ${profile.finnhubIndustry || "Unknown"}\n\n` +
+      `Recent news:\n${headlines}\n\n` +
+      `Is there a spike catalyst here? Rate: STRONG/WEAK/NONE.\n` +
+      `What price target is realistic if catalyst plays out?\n` +
+      `Entry, target, and stop. Is this tradeable right now?`
     );
     res.json({ ticker: ticker.toUpperCase(), data: analysis, ts: new Date().toISOString() });
   } catch (err) {
@@ -242,14 +424,16 @@ app.get("/api/earnings", async (req, res) => {
     const today = new Date().toISOString().split("T")[0];
     const next7 = new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0];
     const calendar = await finnhub(`/calendar/earnings?from=${today}&to=${next7}`);
-    const top  = calendar?.earningsCalendar?.slice(0, 15) || [];
+    const top  = calendar?.earningsCalendar?.slice(0, 20) || [];
     const list = top.map(e =>
       `${e.symbol} | ${e.date} | EPS est: ${e.epsEstimate ?? "N/A"} | Rev: ${e.revenueEstimate ? "$" + e.revenueEstimate + "B" : "N/A"}`
     ).join("\n");
     const analysis = await groq(
-      `This week's earnings:\n${list || "No data."}\n\n` +
-      `Pick the top 5 most market-moving. For each: ticker | date | EPS est | key thing to watch. ` +
-      `End with which one you'd trade and why.`
+      `Upcoming earnings this week:\n${list || "No data."}\n\n` +
+      `Which of these are small caps under $20 with spike potential?\n` +
+      `For each: expected move %, entry before earnings, target, stop.\n` +
+      `Which would you trade for maximum profit? Give exact plan.`,
+      1200
     );
     res.json({ calendar: top, ai_summary: analysis, ts: new Date().toISOString() });
   } catch (err) {
@@ -268,16 +452,26 @@ app.get("/api/analyze", async (req, res) => {
       finnhub(`/company-news?symbol=${ticker.toUpperCase()}&from=${week}&to=${today}`),
     ]);
     const headlines = Array.isArray(news)
-      ? news.slice(0, 6).map(n => `- ${n.headline}`).join("\n") : "";
+      ? news.slice(0, 8).map(n => `- ${n.headline}`).join("\n") : "No news.";
     const analysis = await groq(
-      `Analyze ${ticker.toUpperCase()} for a trade.\n\n` +
-      `Price: $${quote.c} | Open $${quote.o} | H $${quote.h} | L $${quote.l} | Prev $${quote.pc} | ${quote.dp?.toFixed(2)}%\n` +
+      `Spike analysis for ${ticker.toUpperCase()}:\n\n` +
+      `Price: $${quote.c} | Change: ${quote.dp?.toFixed(2)}% | Open: $${quote.o} | H: $${quote.h} | L: $${quote.l}\n` +
+      `Float: ${profile.shareOutstanding}M | Market Cap: $${profile.marketCapitalization}B\n` +
       `${profile.name} | ${profile.finnhubIndustry}\n\n` +
       `News:\n${headlines}\n\n` +
-      `Give: (1) trend/setup (2) key levels (3) catalysts (4) bull/bear lean + why. No fluff.`,
-      1000
+      `Is this a spike candidate? Analyze:\n` +
+      `1. Float size — is it low enough for a big move?\n` +
+      `2. Current momentum — early or late in the move?\n` +
+      `3. Catalyst quality — strong/weak/none?\n` +
+      `4. Entry zone, profit target (+20/50/100%), hard stop\n` +
+      `5. Max risk/reward ratio\n` +
+      `Give a CONVICTION SCORE 1-10 for buying this right now.`,
+      1200
     );
-    res.json({ ticker: ticker.toUpperCase(), price: quote.c, change: quote.dp, analysis, ts: new Date().toISOString() });
+    res.json({
+      ticker: ticker.toUpperCase(), price: quote.c, change: quote.dp,
+      float: profile.shareOutstanding, analysis, ts: new Date().toISOString(),
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -303,7 +497,7 @@ app.get("/api/news", async (req, res) => {
 
 app.get("/api/account", async (req, res) => {
   try {
-    const d = await alpaca("/v2/account");
+    const d   = await alpaca("/v2/account");
     const pnl = parseFloat(d.equity) - parseFloat(d.last_equity);
     res.json({
       equity:          parseFloat(d.equity).toFixed(2),
@@ -375,6 +569,15 @@ app.post("/api/order", async (req, res) => {
     if (type === "limit" && limit_price) body.limit_price = String(limit_price);
     const order = await alpaca("/v2/orders", { method: "POST", body: JSON.stringify(body) });
     res.json({ success: true, order });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/api/order/:id", async (req, res) => {
+  try {
+    await alpaca(`/v2/orders/${req.params.id}`, { method: "DELETE" });
+    res.json({ success: true, cancelled: req.params.id });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -537,7 +740,14 @@ app.get("/api/dashboard", async (req, res) => {
 });
 
 app.get("/health", (_, res) =>
-  res.json({ status: "ok", version: "3.2.0", ai: "groq-llama3-70b", mode: "paper", ts: new Date().toISOString() })
+  res.json({
+    status:   "ok",
+    version:  "4.0.0",
+    ai:       "groq-llama-3.3-70b",
+    mode:     "paper",
+    scanner:  `${SMALL_CAPS.length} small caps`,
+    ts:       new Date().toISOString(),
+  })
 );
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -546,8 +756,9 @@ app.get("/health", (_, res) =>
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`⚡ PulseTrader v3.2 LIVE on port ${PORT}`);
-  console.log(`   AI    : Groq LLaMA3-70B (FREE)`);
-  console.log(`   Mode  : PAPER TRADING`);
-  console.log(`   Fix   : SYSTEM prompt moved above helpers`);
+  console.log(`⚡ PulseTrader v4.0 SPIKE HUNTER on port ${PORT}`);
+  console.log(`   AI      : Groq LLaMA 3.3-70B (FREE)`);
+  console.log(`   Scanner : ${SMALL_CAPS.length} small cap tickers`);
+  console.log(`   Mode    : PAPER TRADING`);
+  console.log(`   Endpoints: /api/movers /api/spikes /api/scanner`);
 });
