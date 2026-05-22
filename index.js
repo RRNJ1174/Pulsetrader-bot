@@ -22,33 +22,22 @@ app.use(express.static("public"));
 // ════════════════════════════════════════════════════════════════════════════
 
 const CONFIG = {
-  // Position sizing
-  POSITION_PCT:       0.20,    // 20% of available cash per trade
-  MAX_POSITIONS:      20,      // unlimited effectively
-  MIN_POSITION_USD:   100,     // min $100 per trade
-
-  // Entry filters
-  MIN_SPIKE_PCT:      5,       // min % move to qualify
-  MIN_VOLUME_RATIO:   10,      // 10x relative volume minimum
-  MIN_FLOAT_ROTATION: 5,       // 5x float rotation minimum
-  MIN_CONVICTION:     7,       // AI conviction threshold
-
-  // No price limit — trade any price
+  POSITION_PCT:       0.20,
+  MAX_POSITIONS:      20,
+  MIN_POSITION_USD:   100,
+  MIN_SPIKE_PCT:      5,
+  MIN_VOLUME_RATIO:   10,
+  MIN_FLOAT_ROTATION: 5,
+  MIN_CONVICTION:     7,
   MAX_PRICE:          9999,
   MIN_PRICE:          0.01,
-
-  // Exit rules
-  FIRST_TARGET_PCT:   20,      // sell 50% at +20%
-  TRAIL_STOP_PCT:     10,      // trailing stop on remaining 50%
-  HARD_STOP_PCT:      15,      // hard stop at -15%
-  VOLUME_DRY_REDUCE:  0.50,    // reduce position 50% when volume dries
-
-  // Scanning
-  SCAN_INTERVAL:      3 * 60 * 1000,  // every 3 min
+  FIRST_TARGET_PCT:   20,
+  TRAIL_STOP_PCT:     10,
+  HARD_STOP_PCT:      15,
+  VOLUME_DRY_REDUCE:  0.50,
+  SCAN_INTERVAL:      3 * 60 * 1000,
   TOP_GAINERS_COUNT:  100,
-
-  // Level 2
-  L2_BID_ASK_RATIO:   1.2,    // bids must be 1.2x asks to confirm entry
+  L2_BID_ASK_RATIO:   1.2,
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -58,7 +47,7 @@ const CONFIG = {
 const BRAIN = {
   totalTrades: 0, wins: 0, losses: 0, totalPnL: 0,
   bestSetups:  {},
-  bestTickers: [],          // no blacklist — fresh eyes every day
+  bestTickers: [],
   recentPerformance: [],
   adjustedFirstTarget: 20,
   adjustedStop: 15,
@@ -68,7 +57,7 @@ const BRAIN = {
 };
 
 const tradeLog     = [];
-const openTrades   = {};     // symbol → { reason, setup, entryPrice, qty, halfSold, peakPrice }
+const openTrades   = {};
 let autoTraderActive = false;
 let scanInterval     = null;
 let lastScanTime     = null;
@@ -76,7 +65,7 @@ let lastGainers      = [];
 let lastAnalysis     = "";
 
 // ════════════════════════════════════════════════════════════════════════════
-// SYSTEM PROMPT — Kev's strategy baked in
+// SYSTEM PROMPT
 // ════════════════════════════════════════════════════════════════════════════
 
 const buildSystem = () => {
@@ -108,7 +97,6 @@ SETUP 1 — S/D FLIP (Primary setup, highest win rate)
 • Confirm: higher lows forming ABOVE the broken supply
 • NO BREAK = NO TRADE — never buy before the break
 • After break: target daily gap fill or next supply zone above
-• Examples: CODX, AUUD, SNAL, AIIO all used this
 
 SETUP 2 — AFTER-HOURS GAPPER CONTINUATION (Day 2 plays)
 • Stock gaps up after-hours (no news required — chart only)
@@ -116,7 +104,6 @@ SETUP 2 — AFTER-HOURS GAPPER CONTINUATION (Day 2 plays)
 • Enter at/after open if holding demand/VWAP
 • Look for higher lows to form in pre-market
 • Target: retest after-hours highs, then new highs
-• Examples: LIMN, AMST, SNAL
 
 SETUP 3 — DIP & RIP OFF 9/20 EMA
 • After initial spike, stock pulls back to 9 EMA or 20 EMA
@@ -124,20 +111,17 @@ SETUP 3 — DIP & RIP OFF 9/20 EMA
 • Price forms higher lows, curls back up off EMA
 • Enter on the curl with volume picking back up
 • Exit: when volume dries OR tape slows on extension
-• Examples: HCWB +270%, CODX multiple entries
 
 SETUP 4 — VWAP RECLAIM
 • Stock fades below VWAP after initial move
 • Reclaims VWAP with volume = strength signal
 • Enter on reclaim, trail stop below VWAP
 • Target: previous highs / supply zone above
-• Examples: ATPC, HCWB
 
 SETUP 5 — 200MA + DEMAND ZONE CONFLUENCE (Highest conviction)
 • Price at BOTH 200MA AND demand zone simultaneously
 • Very high confluence = strongest entry
 • Use larger position size
-• Examples: QUCY (200MA confluence)
 
 ═══ ENTRY RULES ═══
 • 10x-55x relative volume REQUIRED
@@ -145,7 +129,6 @@ SETUP 5 — 200MA + DEMAND ZONE CONFLUENCE (Highest conviction)
 • Strong bid stack on Level 2 (more buyers than sellers)
 • Thin ask wall above (easy to break through)
 • Price above VWAP preferred
-• Add size when volume intensifies on breakout
 • NO BREAK of key level = NO TRADE
 
 ═══ EXIT RULES ═══
@@ -272,11 +255,7 @@ const detectSDFlip = (bars, currentPrice) => {
   const higherLows = last3Closes.length >= 3 &&
     last3Closes[1] > last3Closes[0] &&
     last3Closes[2] > last3Closes[1];
-  return {
-    detected: brokeAbove && higherLows,
-    prevHigh: prevHigh.toFixed(4),
-    brokeAbove, higherLows,
-  };
+  return { detected: brokeAbove && higherLows, prevHigh: prevHigh.toFixed(4), brokeAbove, higherLows };
 };
 
 const detectDipRip = (bars, currentPrice) => {
@@ -289,12 +268,8 @@ const detectDipRip = (bars, currentPrice) => {
   const nearEMA20 = Math.abs(currentPrice - ema20) / ema20 < 0.05;
   const aboveEMA9 = currentPrice >= ema9;
   const vols      = bars.slice(-5).map(b => b.v || 0);
-  const volDecline = vols[0] > vols[2] && vols[2] <= vols[4]; // declining then picking up
-  return {
-    detected: (nearEMA9 || nearEMA20) && aboveEMA9 && volDecline,
-    ema9: ema9?.toFixed(4), ema20: ema20?.toFixed(4),
-    nearEMA9, nearEMA20, aboveEMA9, volDecline,
-  };
+  const volDecline = vols[0] > vols[2] && vols[2] <= vols[4];
+  return { detected: (nearEMA9 || nearEMA20) && aboveEMA9 && volDecline, ema9: ema9?.toFixed(4), ema20: ema20?.toFixed(4), nearEMA9, nearEMA20, aboveEMA9, volDecline };
 };
 
 const getFullTechnicals = async (ticker, currentPrice) => {
@@ -307,7 +282,6 @@ const getFullTechnicals = async (ticker, currentPrice) => {
     );
     const bars = barsData.bars || [];
     if (bars.length < 5) return null;
-
     const closes  = bars.map(b => b.c);
     const vwap    = calcVWAP(bars);
     const ema9    = calcEMA(closes, 9);
@@ -316,43 +290,24 @@ const getFullTechnicals = async (ticker, currentPrice) => {
     const avgVol  = calcAvgVolume(bars);
     const lastVol = bars[bars.length - 1]?.v || 0;
     const volRatio = avgVol > 0 ? lastVol / avgVol : 0;
-
-    // Float rotation (approx from volume)
     const totalDayVol = bars.reduce((s, b) => s + (b.v || 0), 0);
-
     const sdFlip  = detectSDFlip(bars, currentPrice);
     const dipRip  = detectDipRip(bars, currentPrice);
     const vwapReclaim = currentPrice >= vwap && bars.slice(-3).some(b => b.l < vwap);
     const ma200Conf   = ema200 && Math.abs(currentPrice - ema200) / ema200 < 0.05;
-
     const prevDayHigh = bars[0]?.h || 0;
     const aboveVWAP   = currentPrice >= vwap;
-    const stillRising = closes.length >= 3 &&
-      closes[closes.length - 1] > closes[closes.length - 3];
-
-    // Detect volume dry-up
+    const stillRising = closes.length >= 3 && closes[closes.length - 1] > closes[closes.length - 3];
     const recentVols = bars.slice(-6).map(b => b.v || 0);
     const volDryUp   = recentVols.length >= 4 &&
       recentVols.slice(-2).every(v => v < recentVols.slice(0, -2).reduce((s, x) => s + x, 0) / recentVols.slice(0, -2).length * 0.5);
-
     return {
-      vwap: vwap.toFixed(4),
-      ema9: ema9?.toFixed(4),
-      ema20: ema20?.toFixed(4),
-      ema200: ema200?.toFixed(4),
-      aboveVWAP,
-      volRatio: volRatio.toFixed(1),
-      totalDayVol,
-      avgVol: Math.round(avgVol),
-      sdFlip, dipRip, vwapReclaim, ma200Conf,
-      prevDayHigh: prevDayHigh.toFixed(4),
-      stillRising, volDryUp,
-      bars: bars.length,
+      vwap: vwap.toFixed(4), ema9: ema9?.toFixed(4), ema20: ema20?.toFixed(4), ema200: ema200?.toFixed(4),
+      aboveVWAP, volRatio: volRatio.toFixed(1), totalDayVol, avgVol: Math.round(avgVol),
+      sdFlip, dipRip, vwapReclaim, ma200Conf, prevDayHigh: prevDayHigh.toFixed(4),
+      stillRising, volDryUp, bars: bars.length,
     };
-  } catch (e) {
-    console.log(`Tech error ${ticker}:`, e.message);
-    return null;
-  }
+  } catch (e) { console.log(`Tech error ${ticker}:`, e.message); return null; }
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -361,38 +316,25 @@ const getFullTechnicals = async (ticker, currentPrice) => {
 
 const getLevel2 = async (ticker) => {
   try {
-    // Alpaca Level 2 quotes
-    const data = await alpacaData(
-      `/v2/stocks/${ticker}/quotes/latest?feed=iex`
-    );
+    const data = await alpacaData(`/v2/stocks/${ticker}/quotes/latest?feed=iex`);
     const q = data.quote;
     if (!q) return null;
-
-    const bidSize  = q.bs || 0;  // bid size
-    const askSize  = q.as || 0;  // ask size
+    const bidSize  = q.bs || 0;
+    const askSize  = q.as || 0;
     const bid      = q.bp || 0;
     const ask      = q.ap || 0;
     const spread   = ask > 0 ? ((ask - bid) / ask * 100) : 999;
     const bidAskRatio = askSize > 0 ? bidSize / askSize : 0;
-
-    // Strong bids = more buyers, thin ask = easy breakout
     const strongBids  = bidAskRatio >= CONFIG.L2_BID_ASK_RATIO;
-    const tightSpread = spread < 3;  // spread under 3%
+    const tightSpread = spread < 3;
     const goodL2      = strongBids && tightSpread;
-
     return {
-      bid, ask, spread: spread.toFixed(2),
-      bidSize, askSize,
-      bidAskRatio: bidAskRatio.toFixed(2),
-      strongBids, tightSpread, goodL2,
+      bid, ask, spread: spread.toFixed(2), bidSize, askSize,
+      bidAskRatio: bidAskRatio.toFixed(2), strongBids, tightSpread, goodL2,
       signal: goodL2 ? "STRONG BIDS — buyers in control" :
-              strongBids ? "Moderate bids" :
-              "Weak bids — sellers in control",
+              strongBids ? "Moderate bids" : "Weak bids — sellers in control",
     };
-  } catch (e) {
-    console.log(`L2 error ${ticker}:`, e.message);
-    return null;
-  }
+  } catch (e) { console.log(`L2 error ${ticker}:`, e.message); return null; }
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -402,7 +344,6 @@ const getLevel2 = async (ticker) => {
 const getTopGainers = async () => {
   const gainers = [];
 
-  // Method 1: Alpaca full market screener — ALL US stocks
   try {
     const urls = [
       `/v1beta1/screener/stocks/movers?by=percent_change&top=${CONFIG.TOP_GAINERS_COUNT}&market_type=sip`,
@@ -413,15 +354,8 @@ const getTopGainers = async () => {
         const data = await alpacaData(url);
         if (data.gainers?.length) {
           for (const g of data.gainers) {
-            if (
-              g.price >= CONFIG.MIN_PRICE &&
-              g.price <= CONFIG.MAX_PRICE &&
-              g.percent_change >= CONFIG.MIN_SPIKE_PCT
-            ) {
-              gainers.push({
-                ticker: g.symbol, c: g.price, dp: g.percent_change,
-                v: g.volume || 0, source: "alpaca_screener",
-              });
+            if (g.price >= CONFIG.MIN_PRICE && g.price <= CONFIG.MAX_PRICE && g.percent_change >= CONFIG.MIN_SPIKE_PCT) {
+              gainers.push({ ticker: g.symbol, c: g.price, dp: g.percent_change, v: g.volume || 0, source: "alpaca_screener" });
             }
           }
           console.log(`📡 Alpaca screener: ${gainers.length} gainers`);
@@ -431,7 +365,6 @@ const getTopGainers = async () => {
     }
   } catch (e) { console.log("Alpaca screener error:", e.message); }
 
-  // Method 2: Finnhub broad scan backup
   if (gainers.length < 5) {
     const SCAN = [
       "WHLR","PCLA","EDHL","ATPC","LIMN","ILLR","NCPL","VIDA","DGNX","JUNS",
@@ -450,11 +383,7 @@ const getTopGainers = async () => {
         batch.map(t => finnhub(`/quote?symbol=${t}`).then(q => ({ ticker: t, ...q })).catch(() => null))
       );
       for (const q of quotes.filter(Boolean)) {
-        if (
-          q.c >= CONFIG.MIN_PRICE && q.c <= CONFIG.MAX_PRICE &&
-          q.dp >= CONFIG.MIN_SPIKE_PCT && q.v > 10000 &&
-          !gainers.find(g => g.ticker === q.ticker)
-        ) {
+        if (q.c >= CONFIG.MIN_PRICE && q.c <= CONFIG.MAX_PRICE && q.dp >= CONFIG.MIN_SPIKE_PCT && q.v > 10000 && !gainers.find(g => g.ticker === q.ticker)) {
           gainers.push({ ticker: q.ticker, c: q.c, dp: q.dp, v: q.v, h: q.h, l: q.l, source: "finnhub" });
         }
       }
@@ -477,17 +406,10 @@ const analyzeStock = async (ticker, price, pct) => {
       finnhub(`/stock/profile2?symbol=${ticker}`),
       finnhub(`/company-news?symbol=${ticker}&from=${week}&to=${today}`),
     ]);
-    const headlines = Array.isArray(news)
-      ? news.slice(0, 4).map(n => `- ${n.headline}`).join("\n") : "No news";
-    return {
-      ticker, price, pct,
-      float: profile.shareOutstanding || "?",
-      mktCap: profile.marketCapitalization || "?",
-      industry: profile.finnhubIndustry || "?",
-      headlines,
-    };
+    const headlines = Array.isArray(news) ? news.slice(0, 4).map(n => `- ${n.headline}`).join("\n") : "No news";
+    return { ticker, price, pct, float: profile.shareOutstanding || "?", mktCap: profile.marketCapitalization || "?", industry: profile.finnhubIndustry || "?", headlines, name: profile.name || ticker };
   } catch (e) {
-    return { ticker, price, pct, float: "?", mktCap: "?", industry: "?", headlines: "No data" };
+    return { ticker, price, pct, float: "?", mktCap: "?", industry: "?", headlines: "No data", name: ticker };
   }
 };
 
@@ -497,73 +419,41 @@ const analyzeStock = async (ticker, price, pct) => {
 
 const learnFromTrade = async (trade) => {
   const won = trade.pnl > 0;
-  BRAIN.totalTrades++;
-  won ? BRAIN.wins++ : BRAIN.losses++;
+  BRAIN.totalTrades++; won ? BRAIN.wins++ : BRAIN.losses++;
   BRAIN.totalPnL += trade.pnl || 0;
-
-  // Track setup performance
   if (trade.setup) {
     if (!BRAIN.bestSetups[trade.setup]) BRAIN.bestSetups[trade.setup] = { trades: 0, wins: 0, winRate: 0 };
     BRAIN.bestSetups[trade.setup].trades++;
     if (won) BRAIN.bestSetups[trade.setup].wins++;
-    BRAIN.bestSetups[trade.setup].winRate =
-      (BRAIN.bestSetups[trade.setup].wins / BRAIN.bestSetups[trade.setup].trades) * 100;
+    BRAIN.bestSetups[trade.setup].winRate = (BRAIN.bestSetups[trade.setup].wins / BRAIN.bestSetups[trade.setup].trades) * 100;
   }
-
-  // No blacklist — just track performance
   if (won && !BRAIN.bestTickers.includes(trade.symbol)) {
     BRAIN.bestTickers.unshift(trade.symbol);
     BRAIN.bestTickers = BRAIN.bestTickers.slice(0, 20);
   }
-
   BRAIN.recentPerformance.unshift({ ...trade, won });
   BRAIN.recentPerformance = BRAIN.recentPerformance.slice(0, 20);
-
-  // Dynamic adjustment
   const rw = BRAIN.recentPerformance.filter(t => t.won).length;
   const rt = BRAIN.recentPerformance.length;
   if (rt >= 5) {
     const rate = rw / rt;
-    if (rate > 0.65) {
-      BRAIN.adjustedFirstTarget = Math.min(35, BRAIN.adjustedFirstTarget + 2);
-      BRAIN.adjustedConviction  = Math.max(6, BRAIN.adjustedConviction - 1);
-      console.log("📈 Winning streak — raising targets");
-    } else if (rate < 0.35) {
-      BRAIN.adjustedFirstTarget = Math.max(15, BRAIN.adjustedFirstTarget - 2);
-      BRAIN.adjustedStop        = Math.max(8,  BRAIN.adjustedStop - 1);
-      BRAIN.adjustedConviction  = Math.min(9,  BRAIN.adjustedConviction + 1);
-      console.log("📉 Losing streak — tightening rules");
-    }
+    if (rate > 0.65) { BRAIN.adjustedFirstTarget = Math.min(35, BRAIN.adjustedFirstTarget + 2); BRAIN.adjustedConviction = Math.max(6, BRAIN.adjustedConviction - 1); }
+    else if (rate < 0.35) { BRAIN.adjustedFirstTarget = Math.max(15, BRAIN.adjustedFirstTarget - 2); BRAIN.adjustedStop = Math.max(8, BRAIN.adjustedStop - 1); BRAIN.adjustedConviction = Math.min(9, BRAIN.adjustedConviction + 1); }
     CONFIG.FIRST_TARGET_PCT = BRAIN.adjustedFirstTarget;
     CONFIG.HARD_STOP_PCT    = BRAIN.adjustedStop;
     CONFIG.MIN_CONVICTION   = BRAIN.adjustedConviction;
   }
-
-  // AI lesson extraction
   try {
     const lesson = await groq(
-      `Trade closed: ${trade.symbol} | ${won ? "WIN ✅" : "LOSS ❌"}\n` +
-      `P&L: $${trade.pnl?.toFixed(2)} (${trade.pnlPct?.toFixed(1)}%)\n` +
-      `Entry: $${trade.entryPrice} → Exit: $${trade.exitPrice}\n` +
-      `Setup: ${trade.setup} | Exit reason: ${trade.exitReason}\n\n` +
-      `ONE specific lesson about Kev's strategy for future trades:`, 80
+      `Trade closed: ${trade.symbol} | ${won ? "WIN ✅" : "LOSS ❌"}\nP&L: $${trade.pnl?.toFixed(2)} (${trade.pnlPct?.toFixed(1)}%)\nEntry: $${trade.entryPrice} → Exit: $${trade.exitPrice}\nSetup: ${trade.setup} | Exit reason: ${trade.exitReason}\n\nONE specific lesson about Kev's strategy for future trades:`, 80
     );
     BRAIN.lessons.unshift(lesson.trim());
-    BRAIN.lessons     = BRAIN.lessons.slice(0, 10);
+    BRAIN.lessons = BRAIN.lessons.slice(0, 10);
     BRAIN.lastLearned = new Date().toISOString();
-    console.log(`🧠 Lesson: ${lesson.trim()}`);
   } catch (e) {}
-
   await supabase("bot_trade_memory", {
     method: "POST",
-    body: JSON.stringify({
-      symbol: trade.symbol, side: "LONG",
-      entry_price: trade.entryPrice, exit_price: trade.exitPrice,
-      pnl: trade.pnl, pnl_pct: trade.pnlPct,
-      entry_reason: trade.reason, exit_reason: trade.exitReason,
-      setup_type: trade.setup, won,
-      entry_hour: new Date().getHours(), day_of_week: new Date().getDay(),
-    }),
+    body: JSON.stringify({ symbol: trade.symbol, side: "LONG", entry_price: trade.entryPrice, exit_price: trade.exitPrice, pnl: trade.pnl, pnl_pct: trade.pnlPct, entry_reason: trade.reason, exit_reason: trade.exitReason, setup_type: trade.setup, won, entry_hour: new Date().getHours(), day_of_week: new Date().getDay() }),
   }).catch(() => {});
 };
 
@@ -571,17 +461,13 @@ const loadMemory = async () => {
   try {
     const mem = await supabase("bot_trade_memory?order=created_at.desc&limit=200");
     if (!Array.isArray(mem) || !mem.length) { console.log("🧠 Fresh start"); return; }
-    BRAIN.totalTrades = mem.length;
-    BRAIN.wins        = mem.filter(m => m.won).length;
-    BRAIN.losses      = mem.filter(m => !m.won).length;
-    BRAIN.totalPnL    = mem.reduce((s, m) => s + parseFloat(m.pnl || 0), 0);
+    BRAIN.totalTrades = mem.length; BRAIN.wins = mem.filter(m => m.won).length; BRAIN.losses = mem.filter(m => !m.won).length; BRAIN.totalPnL = mem.reduce((s, m) => s + parseFloat(m.pnl || 0), 0);
     mem.forEach(m => {
       if (m.setup_type) {
         if (!BRAIN.bestSetups[m.setup_type]) BRAIN.bestSetups[m.setup_type] = { trades: 0, wins: 0, winRate: 0 };
         BRAIN.bestSetups[m.setup_type].trades++;
         if (m.won) BRAIN.bestSetups[m.setup_type].wins++;
-        BRAIN.bestSetups[m.setup_type].winRate =
-          (BRAIN.bestSetups[m.setup_type].wins / BRAIN.bestSetups[m.setup_type].trades) * 100;
+        BRAIN.bestSetups[m.setup_type].winRate = (BRAIN.bestSetups[m.setup_type].wins / BRAIN.bestSetups[m.setup_type].trades) * 100;
       }
       if (m.won && !BRAIN.bestTickers.includes(m.symbol)) BRAIN.bestTickers.push(m.symbol);
     });
@@ -601,87 +487,48 @@ const isOpen = () => { const et = getET(), d = et.getDay(); if (d === 0 || d ===
 const isPre  = () => { const et = getET(), d = et.getDay(); if (d === 0 || d === 6) return false; const t = et.getHours() * 100 + et.getMinutes(); return t >= 400 && t < 930; };
 
 // ════════════════════════════════════════════════════════════════════════════
-// POSITION MANAGER — handles partial exits, trailing, volume dry-up
+// POSITION MANAGER
 // ════════════════════════════════════════════════════════════════════════════
 
 const managePositions = async (positions) => {
   if (!Array.isArray(positions)) return;
-
   for (const pos of positions) {
     const sym     = pos.symbol;
     const pnlPct  = parseFloat(pos.unrealized_plpc) * 100;
     const curPrice = parseFloat(pos.current_price);
     const entry   = openTrades[sym];
     if (!entry) continue;
-
-    // Track peak price for trailing stop
-    if (!entry.peakPrice || curPrice > entry.peakPrice) {
-      entry.peakPrice = curPrice;
-    }
-
-    const fromPeak = entry.peakPrice > 0
-      ? ((curPrice - entry.peakPrice) / entry.peakPrice) * 100 : 0;
-
-    // 1. Sell 50% at first target (+20%)
+    if (!entry.peakPrice || curPrice > entry.peakPrice) entry.peakPrice = curPrice;
+    const fromPeak = entry.peakPrice > 0 ? ((curPrice - entry.peakPrice) / entry.peakPrice) * 100 : 0;
     if (!entry.halfSold && pnlPct >= CONFIG.FIRST_TARGET_PCT) {
       const halfQty = Math.floor(parseFloat(pos.qty) / 2);
       if (halfQty >= 1) {
-        console.log(`🎯 FIRST TARGET: ${sym} +${pnlPct.toFixed(1)}% — selling 50%`);
-        await alpaca("/v2/orders", {
-          method: "POST",
-          body: JSON.stringify({ symbol: sym, qty: String(halfQty), side: "sell", type: "market", time_in_force: "day" }),
-        });
+        await alpaca("/v2/orders", { method: "POST", body: JSON.stringify({ symbol: sym, qty: String(halfQty), side: "sell", type: "market", time_in_force: "day" }) });
         entry.halfSold = true;
         tradeLog.unshift({ type: "PARTIAL_SELL", symbol: sym, qty: halfQty, price: curPrice, pnlPct: pnlPct.toFixed(1), reason: "First target +20%", ts: new Date().toISOString() });
       }
     }
-
-    // 2. Trailing stop on remaining (trail from peak)
     if (entry.halfSold && fromPeak <= -CONFIG.TRAIL_STOP_PCT) {
-      console.log(`📉 TRAIL STOP: ${sym} dropped ${fromPeak.toFixed(1)}% from peak`);
-      await alpaca("/v2/orders", {
-        method: "POST",
-        body: JSON.stringify({ symbol: sym, qty: pos.qty, side: "sell", type: "market", time_in_force: "day" }),
-      });
+      await alpaca("/v2/orders", { method: "POST", body: JSON.stringify({ symbol: sym, qty: pos.qty, side: "sell", type: "market", time_in_force: "day" }) });
       const t = { symbol: sym, pnl: parseFloat(pos.unrealized_pl), pnlPct, entryPrice: pos.avg_entry_price, exitPrice: curPrice, reason: entry.reason, setup: entry.setup, exitReason: "TRAIL STOP", type: "SELL", price: curPrice, ts: new Date().toISOString() };
-      tradeLog.unshift(t); await learnFromTrade(t); delete openTrades[sym];
-      continue;
+      tradeLog.unshift(t); await learnFromTrade(t); delete openTrades[sym]; continue;
     }
-
-    // 3. Hard stop at -15%
     if (pnlPct <= -CONFIG.HARD_STOP_PCT) {
-      console.log(`🛑 HARD STOP: ${sym} ${pnlPct.toFixed(1)}%`);
-      await alpaca("/v2/orders", {
-        method: "POST",
-        body: JSON.stringify({ symbol: sym, qty: pos.qty, side: "sell", type: "market", time_in_force: "day" }),
-      });
+      await alpaca("/v2/orders", { method: "POST", body: JSON.stringify({ symbol: sym, qty: pos.qty, side: "sell", type: "market", time_in_force: "day" }) });
       const t = { symbol: sym, pnl: parseFloat(pos.unrealized_pl), pnlPct, entryPrice: pos.avg_entry_price, exitPrice: curPrice, reason: entry.reason, setup: entry.setup, exitReason: "HARD STOP", type: "STOP", price: curPrice, ts: new Date().toISOString() };
-      tradeLog.unshift(t); await learnFromTrade(t); delete openTrades[sym];
-      continue;
+      tradeLog.unshift(t); await learnFromTrade(t); delete openTrades[sym]; continue;
     }
-
-    // 4. Check for volume dry-up → reduce 50% (not full exit)
     const tech = await getFullTechnicals(sym, curPrice).catch(() => null);
     if (tech?.volDryUp && !entry.volumeReduced) {
       const reduceQty = Math.floor(parseFloat(pos.qty) * CONFIG.VOLUME_DRY_REDUCE);
       if (reduceQty >= 1) {
-        console.log(`📊 VOLUME DRY: ${sym} — reducing position 50%`);
-        await alpaca("/v2/orders", {
-          method: "POST",
-          body: JSON.stringify({ symbol: sym, qty: String(reduceQty), side: "sell", type: "market", time_in_force: "day" }),
-        });
+        await alpaca("/v2/orders", { method: "POST", body: JSON.stringify({ symbol: sym, qty: String(reduceQty), side: "sell", type: "market", time_in_force: "day" }) });
         entry.volumeReduced = true;
         tradeLog.unshift({ type: "REDUCE", symbol: sym, qty: reduceQty, price: curPrice, reason: "Volume dry-up", ts: new Date().toISOString() });
       }
     }
-
-    // 5. Exit if price drops below 9 EMA
     if (tech?.ema9 && curPrice < parseFloat(tech.ema9) && entry.halfSold) {
-      console.log(`📉 BELOW 9 EMA: ${sym} — exiting remaining`);
-      await alpaca("/v2/orders", {
-        method: "POST",
-        body: JSON.stringify({ symbol: sym, qty: pos.qty, side: "sell", type: "market", time_in_force: "day" }),
-      });
+      await alpaca("/v2/orders", { method: "POST", body: JSON.stringify({ symbol: sym, qty: pos.qty, side: "sell", type: "market", time_in_force: "day" }) });
       const t = { symbol: sym, pnl: parseFloat(pos.unrealized_pl), pnlPct, entryPrice: pos.avg_entry_price, exitPrice: curPrice, reason: entry.reason, setup: entry.setup, exitReason: "BELOW 9 EMA", type: "SELL", price: curPrice, ts: new Date().toISOString() };
       tradeLog.unshift(t); await learnFromTrade(t); delete openTrades[sym];
     }
@@ -693,58 +540,33 @@ const managePositions = async (positions) => {
 // ════════════════════════════════════════════════════════════════════════════
 
 const autoTrade = async () => {
-  // Trade 24/7 — scan whenever signal fires
   lastScanTime = new Date().toISOString();
   const marketStatus = isOpen() ? "OPEN" : isPre() ? "PRE-MARKET" : "AFTER-HOURS";
   console.log(`🔍 Scanning [${marketStatus}]...`);
-
   try {
-    // 1. Manage existing positions first
-    const [positions, account] = await Promise.all([
-      alpaca("/v2/positions").catch(() => []),
-      alpaca("/v2/account").catch(() => null),
-    ]);
+    const [positions, account] = await Promise.all([alpaca("/v2/positions").catch(() => []), alpaca("/v2/account").catch(() => null)]);
     await managePositions(positions);
-
-    // 2. Check cash available
-    const cash     = account ? parseFloat(account.cash) : 0;
-    const posSize  = Math.max(CONFIG.MIN_POSITION_USD, cash * CONFIG.POSITION_PCT);
+    const cash    = account ? parseFloat(account.cash) : 0;
+    const posSize = Math.max(CONFIG.MIN_POSITION_USD, cash * CONFIG.POSITION_PCT);
     if (cash < CONFIG.MIN_POSITION_USD) { console.log("⚠️ Low cash"); return; }
-
-    // 3. Get all top gainers
     const gainers = await getTopGainers();
     lastGainers   = gainers.slice(0, 20);
     if (!gainers.length) { console.log("⏭️ No gainers found"); return; }
     console.log(`📊 ${gainers.length} gainers | Top: ${gainers.slice(0, 5).map(g => `${g.ticker}+${g.dp?.toFixed(0)}%`).join(", ")}`);
-
-    // 4. Technical + L2 analysis on top 10
     const owned = Array.isArray(positions) ? positions.map(p => p.symbol) : [];
     const candidates = gainers.filter(g => !owned.includes(g.ticker)).slice(0, 10);
     if (!candidates.length) return;
-
-    const analysisResults = await Promise.all(
-      candidates.map(async g => {
-        const [info, tech, l2] = await Promise.all([
-          analyzeStock(g.ticker, g.c, g.dp),
-          getFullTechnicals(g.ticker, g.c),
-          getLevel2(g.ticker),
-        ]);
-        return { ...g, info, tech, l2 };
-      })
-    );
-
-    // 5. Filter by volume ratio and L2
+    const analysisResults = await Promise.all(candidates.map(async g => {
+      const [info, tech, l2] = await Promise.all([analyzeStock(g.ticker, g.c, g.dp), getFullTechnicals(g.ticker, g.c), getLevel2(g.ticker)]);
+      return { ...g, info, tech, l2 };
+    }));
     const qualified = analysisResults.filter(s => {
       const volRatio = parseFloat(s.tech?.volRatio || 0);
-      return volRatio >= CONFIG.MIN_VOLUME_RATIO || s.dp >= 20; // high % moves pass too
+      return volRatio >= CONFIG.MIN_VOLUME_RATIO || s.dp >= 20;
     });
-
     if (!qualified.length) { console.log("⏭️ No stocks passed volume filter"); return; }
-
-    // 6. Build candidate string with ALL technical data
     const candStr = qualified.slice(0, 6).map(s => {
-      const t = s.tech;
-      const l = s.l2;
+      const t = s.tech, l = s.l2;
       return (
         `${s.ticker}: $${s.c} +${s.dp?.toFixed(1)}% | Float:${s.info?.float}M | Cap:$${s.info?.mktCap}B\n` +
         `Technicals: VWAP ${t?.aboveVWAP ? "↑ABOVE" : "↓below"} ($${t?.vwap}) | EMA9:$${t?.ema9} | EMA20:$${t?.ema20}\n` +
@@ -754,28 +576,13 @@ const autoTrade = async () => {
         `News: ${s.info?.headlines?.split("\n")[0] || "no news"}`
       );
     }).join("\n\n");
-
     lastAnalysis = candStr;
-
-    // 7. AI picks based on Kev's strategy
     const verdict = await groq(
-      `REAL stocks with technical data — pick using Kev's strategy:\n\n${candStr}\n\n` +
-      `Apply Kev's rules:\n` +
-      `1. S/D flip confirmed? (broke above supply + higher lows)\n` +
-      `2. Volume 10x+? Float rotation high?\n` +
-      `3. Level 2 showing strong bids?\n` +
-      `4. Above VWAP? EMA curl?\n` +
-      `5. Good risk/reward?\n\n` +
-      `Pick ALL stocks that qualify (conviction ${CONFIG.MIN_CONVICTION}+).\n` +
-      `Reply ONLY:\nBUY: TICKER | CONVICTION: X | SETUP: name | REASON: one line`,
-      600
+      `REAL stocks with technical data — pick using Kev's strategy:\n\n${candStr}\n\nApply Kev's rules:\n1. S/D flip confirmed?\n2. Volume 10x+?\n3. Level 2 showing strong bids?\n4. Above VWAP? EMA curl?\n5. Good risk/reward?\n\nPick ALL stocks that qualify (conviction ${CONFIG.MIN_CONVICTION}+).\nReply ONLY:\nBUY: TICKER | CONVICTION: X | SETUP: name | REASON: one line`, 600
     );
-
     console.log("🤖 AI verdict:", verdict);
-
     const buyLines = verdict.split("\n").filter(l => l.startsWith("BUY:"));
     let buys = 0;
-
     for (const line of buyLines) {
       const m = line.match(/BUY:\s*([A-Z]+)\s*\|\s*CONVICTION:\s*([\d.]+)/i);
       if (!m) continue;
@@ -783,49 +590,23 @@ const autoTrade = async () => {
       const conviction = parseFloat(m[2]);
       if (conviction < CONFIG.MIN_CONVICTION) continue;
       if (owned.includes(ticker)) continue;
-
-      // Must be in real scan
       const stock = qualified.find(s => s.ticker === ticker);
       if (!stock || stock.c <= 0) { console.log(`🚫 ${ticker} not in qualified list`); continue; }
-
-      // Check L2 — skip if big seller on ask
-      if (stock.l2 && parseFloat(stock.l2.bidAskRatio) < 0.5) {
-        console.log(`🚫 ${ticker} — big seller on L2, skipping`);
-        continue;
-      }
-
-      const qty = Math.floor(posSize / stock.c);
+      if (stock.l2 && parseFloat(stock.l2.bidAskRatio) < 0.5) { console.log(`🚫 ${ticker} — big seller on L2, skipping`); continue; }
+      const qty    = Math.floor(posSize / stock.c);
       if (qty < 1) continue;
-
       const setup  = line.match(/SETUP:\s*([a-z_]+)/i)?.[1] || "momentum";
       const reason = line.match(/REASON:\s*(.+)/i)?.[1]   || "Kev strategy signal";
-
       console.log(`🚀 BUY ${ticker} x${qty} @ $${stock.c} | ${setup} | c${conviction} | L2:${stock.l2?.signal}`);
-
-      const order = await alpaca("/v2/orders", {
-        method: "POST",
-        body: JSON.stringify({ symbol: ticker, qty: String(qty), side: "buy", type: "market", time_in_force: "day" }),
-      });
-
+      const order = await alpaca("/v2/orders", { method: "POST", body: JSON.stringify({ symbol: ticker, qty: String(qty), side: "buy", type: "market", time_in_force: "day" }) });
       if (order.id) {
         openTrades[ticker] = { reason, setup, conviction, entryPrice: stock.c, qty, halfSold: false, peakPrice: stock.c, time: new Date().toISOString() };
-        tradeLog.unshift({
-          type: "BUY", symbol: ticker, qty, price: stock.c, conviction, reason, setup,
-          target: (stock.c * (1 + CONFIG.FIRST_TARGET_PCT / 100)).toFixed(2),
-          stop:   (stock.c * (1 - CONFIG.HARD_STOP_PCT / 100)).toFixed(2),
-          l2:     stock.l2?.signal, tech_score: stock.tech?.volRatio,
-          ts: new Date().toISOString(),
-        });
-        await supabase("pulsetrader_trades", {
-          method: "POST",
-          body: JSON.stringify({ symbol: ticker, side: "LONG", qty, entry_price: stock.c, reason: `AUTO[${setup}|c${conviction}]: ${reason}` }),
-        }).catch(() => {});
-        buys++;
-        console.log(`✅ Bought ${ticker}`);
+        tradeLog.unshift({ type: "BUY", symbol: ticker, qty, price: stock.c, conviction, reason, setup, target: (stock.c * (1 + CONFIG.FIRST_TARGET_PCT / 100)).toFixed(2), stop: (stock.c * (1 - CONFIG.HARD_STOP_PCT / 100)).toFixed(2), l2: stock.l2?.signal, tech_score: stock.tech?.volRatio, ts: new Date().toISOString() });
+        await supabase("pulsetrader_trades", { method: "POST", body: JSON.stringify({ symbol: ticker, side: "LONG", qty, entry_price: stock.c, reason: `AUTO[${setup}|c${conviction}]: ${reason}` }) }).catch(() => {});
+        buys++; console.log(`✅ Bought ${ticker}`);
       }
     }
     if (buys === 0) console.log("⏭️ No qualifying entries this cycle");
-
   } catch (e) { console.error("Auto-trade error:", e.message); }
 };
 
@@ -856,10 +637,7 @@ app.get( "/api/autotrader/start", (_, res) => { startAutoTrader(); res.json({ st
 app.post("/api/autotrader/stop",  (_, res) => { stopAutoTrader();  res.json({ status: "stopped" }); });
 
 app.get("/api/autotrader/status", async (req, res) => {
-  const [positions, account] = await Promise.all([
-    alpaca("/v2/positions").catch(() => []),
-    alpaca("/v2/account").catch(() => null),
-  ]);
+  const [positions, account] = await Promise.all([alpaca("/v2/positions").catch(() => []), alpaca("/v2/account").catch(() => null)]);
   const todayPnL = account ? parseFloat(account.equity) - parseFloat(account.last_equity) : 0;
   res.json({
     active: autoTraderActive, last_scan: lastScanTime,
@@ -869,30 +647,11 @@ app.get("/api/autotrader/status", async (req, res) => {
     cash:   account ? parseFloat(account.cash).toFixed(2) : "—",
     today_pnl: todayPnL.toFixed(2),
     today_pnl_pct: account ? ((todayPnL / parseFloat(account.last_equity)) * 100).toFixed(2) + "%" : "—",
-    config: {
-      position_pct: (CONFIG.POSITION_PCT * 100) + "%",
-      first_target: CONFIG.FIRST_TARGET_PCT + "%",
-      trail_stop: CONFIG.TRAIL_STOP_PCT + "%",
-      hard_stop: CONFIG.HARD_STOP_PCT + "%",
-      min_conviction: CONFIG.MIN_CONVICTION,
-      min_volume_ratio: CONFIG.MIN_VOLUME_RATIO + "x",
-      scan_interval: "3 min",
-    },
+    config: { position_pct: (CONFIG.POSITION_PCT * 100) + "%", first_target: CONFIG.FIRST_TARGET_PCT + "%", trail_stop: CONFIG.TRAIL_STOP_PCT + "%", hard_stop: CONFIG.HARD_STOP_PCT + "%", min_conviction: CONFIG.MIN_CONVICTION, min_volume_ratio: CONFIG.MIN_VOLUME_RATIO + "x", scan_interval: "3 min" },
     recent_trades: tradeLog.slice(0, 20),
     last_gainers:  lastGainers,
     last_analysis: lastAnalysis,
-    brain: {
-      total_trades:    BRAIN.totalTrades,
-      wins:            BRAIN.wins,
-      losses:          BRAIN.losses,
-      win_rate:        BRAIN.totalTrades > 0 ? ((BRAIN.wins / BRAIN.totalTrades) * 100).toFixed(1) + "%" : "0%",
-      total_pnl:       BRAIN.totalPnL.toFixed(2),
-      best_setups:     BRAIN.bestSetups,
-      best_tickers:    BRAIN.bestTickers,
-      lessons:         BRAIN.lessons,
-      adjusted_target: BRAIN.adjustedFirstTarget + "%",
-      adjusted_stop:   BRAIN.adjustedStop + "%",
-    },
+    brain: { total_trades: BRAIN.totalTrades, wins: BRAIN.wins, losses: BRAIN.losses, win_rate: BRAIN.totalTrades > 0 ? ((BRAIN.wins / BRAIN.totalTrades) * 100).toFixed(1) + "%" : "0%", total_pnl: BRAIN.totalPnL.toFixed(2), best_setups: BRAIN.bestSetups, best_tickers: BRAIN.bestTickers, lessons: BRAIN.lessons, adjusted_target: BRAIN.adjustedFirstTarget + "%", adjusted_stop: BRAIN.adjustedStop + "%" },
   });
 });
 
@@ -904,15 +663,11 @@ app.post("/api/autotrader/sellall", async (req, res) => {
   try {
     const p = await alpaca("/v2/positions");
     if (!Array.isArray(p) || !p.length) return res.json({ message: "No positions" });
-    await Promise.all(p.map(x => alpaca("/v2/orders", {
-      method: "POST",
-      body: JSON.stringify({ symbol: x.symbol, qty: x.qty, side: "sell", type: "market", time_in_force: "day" }),
-    })));
+    await Promise.all(p.map(x => alpaca("/v2/orders", { method: "POST", body: JSON.stringify({ symbol: x.symbol, qty: x.qty, side: "sell", type: "market", time_in_force: "day" }) })));
     res.json({ message: `Sold ${p.length} positions` });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Teach the bot
 app.post("/api/teach", async (req, res) => {
   const { tickers, context, instruction } = req.body;
   if (!tickers?.length) return res.status(400).json({ error: "tickers required" });
@@ -931,38 +686,24 @@ app.post("/api/teach", async (req, res) => {
       ]);
       const headlines = Array.isArray(news) ? news.slice(0, 6).map(n => `- ${n.headline}`).join("\n") : "No news.";
       const analysis = await groq(
-        `${instruction || "Analyze using Kev's strategy"}\n\n` +
-        `${ticker.toUpperCase()}: $${quote.c} | +${quote.dp?.toFixed(2)}% | Float:${profile.shareOutstanding}M\n` +
-        `Tech: SD_Flip:${tech?.sdFlip?.detected} | DipRip:${tech?.dipRip?.detected} | VWAP:${tech?.aboveVWAP ? "above" : "below"} | Vol:${tech?.volRatio}x\n` +
-        `Level2: ${l2?.signal} | Bid/Ask: ${l2?.bidAskRatio}\n` +
-        `${context ? "Context: " + context + "\n" : ""}News:\n${headlines}\n\n` +
-        `Apply Kev's rules: 1. Which setup is this? 2. Where is the S/D flip level? 3. Entry, target, stop? 4. Level 2 bullish or bearish?`, 1000
+        `${instruction || "Analyze using Kev's strategy"}\n\n${ticker.toUpperCase()}: $${quote.c} | +${quote.dp?.toFixed(2)}% | Float:${profile.shareOutstanding}M\nTech: SD_Flip:${tech?.sdFlip?.detected} | DipRip:${tech?.dipRip?.detected} | VWAP:${tech?.aboveVWAP ? "above" : "below"} | Vol:${tech?.volRatio}x\nLevel2: ${l2?.signal} | Bid/Ask: ${l2?.bidAskRatio}\n${context ? "Context: " + context + "\n" : ""}News:\n${headlines}\n\nApply Kev's rules.`, 1000
       );
       const lesson = analysis.slice(-150);
-      BRAIN.lessons.unshift(lesson);
-      BRAIN.lessons = BRAIN.lessons.slice(0, 10);
+      BRAIN.lessons.unshift(lesson); BRAIN.lessons = BRAIN.lessons.slice(0, 10);
       if (!BRAIN.bestTickers.includes(ticker.toUpperCase())) BRAIN.bestTickers.unshift(ticker.toUpperCase());
-      await supabase("bot_lessons", {
-        method: "POST",
-        body: JSON.stringify({ ticker: ticker.toUpperCase(), lesson, pattern: instruction || "user taught", catalyst: headlines.slice(0, 200), taught_by: "user" }),
-      }).catch(() => {});
+      await supabase("bot_lessons", { method: "POST", body: JSON.stringify({ ticker: ticker.toUpperCase(), lesson, pattern: instruction || "user taught", catalyst: headlines.slice(0, 200), taught_by: "user" }) }).catch(() => {});
       lessons.push({ ticker: ticker.toUpperCase(), analysis, lesson, tech, l2 });
-      console.log(`🎓 Taught: ${ticker}`);
     } catch (e) { lessons.push({ ticker, error: e.message }); }
   }
   res.json({ message: `Studied ${lessons.length} stocks`, lessons });
 });
 
-// Chat
 app.post("/api/chat", async (req, res) => {
   const { messages } = req.body;
   if (!messages?.length) return res.status(400).json({ error: "No messages" });
   try {
-    const [spy, account] = await Promise.all([
-      finnhub("/quote?symbol=SPY").catch(() => null),
-      alpaca("/v2/account").catch(() => null),
-    ]);
-    const gainersStr = lastGainers.slice(0, 5).map(g => `${g.ticker}+${g.dp?.toFixed(0)}%`).join(",") || "scanning";
+    const [spy, account] = await Promise.all([finnhub("/quote?symbol=SPY").catch(() => null), alpaca("/v2/account").catch(() => null)]);
+    const gainersStr = lastGainers.slice(0, 5).map(g => `${g.ticker || g.symbol}+${(g.dp || g.change_pct)?.toFixed ? (g.dp || g.change_pct).toFixed(0) : (g.dp || g.change_pct)}%`).join(",") || "scanning";
     const ctx = [
       spy?.c ? `[SPY $${spy.c} (${spy.dp > 0 ? "+" : ""}${spy.dp?.toFixed(2)}%)]` : "",
       account ? `[Portfolio: $${parseFloat(account.equity).toFixed(0)} | Cash: $${parseFloat(account.cash).toFixed(0)}]` : "",
@@ -975,25 +716,136 @@ app.post("/api/chat", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Movers
+// ════════════════════════════════════════════════════════════════════════════
+// /api/movers — MOVE 1: Webull-style gainers with names, news, AI analysis
+// ════════════════════════════════════════════════════════════════════════════
+
 app.get("/api/movers", async (req, res) => {
   try {
-    const gainers = await getTopGainers();
-    lastGainers   = gainers.slice(0, 20);
-    if (!gainers.length) return res.json({ data: "No real gainers right now. Check back at market open.", raw: [], ts: new Date().toISOString() });
-    const top = gainers.slice(0, 10);
-    const analyses = await Promise.all(top.map(g => analyzeStock(g.ticker, g.c, g.dp)));
-    const dataStr = analyses.map(a =>
-      `${a.ticker}: $${a.price} +${a.pct?.toFixed(1)}% | Float:${a.float}M\nCatalyst: ${a.headlines?.split("\n")[0] || "none"}`
-    ).join("\n\n");
-    const ai = await groq(
-      `REAL gainers (ONLY these):\n\n${dataStr}\n\n` +
-      `Apply Kev's S/D flip strategy. For each: which setup? Entry? Target? Stop? Conviction 1-10?\n` +
-      `End with #1 trade using Kev's exact rules.`, 1500
-    );
-    res.json({ data: ai, raw: gainers.slice(0, 20), scanned: gainers.length, ts: new Date().toISOString() });
+    const rawGainers = await getTopGainers();
+    lastGainers = rawGainers.slice(0, 20);
+
+    if (!rawGainers.length) {
+      return res.json({
+        gainers: [],
+        analysis: "No real gainers right now. Check back at market open.",
+        scanned: 0,
+        ts: new Date().toISOString(),
+      });
+    }
+
+    const top = rawGainers.slice(0, 15);
+
+    // Enrich each gainer: company name + top news headlines
+    const enriched = await Promise.all(top.map(async (g) => {
+      try {
+        const threeDaysAgo = new Date(Date.now() - 3 * 86400000).toISOString().split("T")[0];
+        const today        = new Date().toISOString().split("T")[0];
+        const [profile, news] = await Promise.all([
+          finnhub(`/stock/profile2?symbol=${g.ticker}`),
+          finnhub(`/company-news?symbol=${g.ticker}&from=${threeDaysAgo}&to=${today}`),
+        ]);
+        const topNews = Array.isArray(news)
+          ? news.slice(0, 3).map(n => ({ headline: n.headline, source: n.source, url: n.url, datetime: n.datetime }))
+          : [];
+        const catalyst = topNews[0]?.headline || null;
+        const volFmt = g.v >= 1_000_000 ? (g.v / 1_000_000).toFixed(1) + "M"
+                     : g.v >= 1_000     ? (g.v / 1_000).toFixed(0) + "K"
+                     : String(g.v || 0);
+        return {
+          symbol:     g.ticker,
+          name:       profile?.name || g.ticker,
+          price:      parseFloat(g.c || 0).toFixed(2),
+          change_pct: parseFloat(g.dp || 0).toFixed(2),
+          volume:     g.v || 0,
+          volume_fmt: volFmt,
+          float:      profile?.shareOutstanding || null,
+          mkt_cap:    profile?.marketCapitalization || null,
+          industry:   profile?.finnhubIndustry || null,
+          news:       topNews,
+          catalyst:   catalyst,
+          source:     g.source || "scan",
+        };
+      } catch (e) {
+        const volFmt = g.v >= 1_000_000 ? (g.v / 1_000_000).toFixed(1) + "M"
+                     : g.v >= 1_000     ? (g.v / 1_000).toFixed(0) + "K"
+                     : String(g.v || 0);
+        return {
+          symbol:     g.ticker,
+          name:       g.ticker,
+          price:      parseFloat(g.c || 0).toFixed(2),
+          change_pct: parseFloat(g.dp || 0).toFixed(2),
+          volume:     g.v || 0,
+          volume_fmt: volFmt,
+          float:      null,
+          mkt_cap:    null,
+          industry:   null,
+          news:       [],
+          catalyst:   null,
+          source:     g.source || "scan",
+        };
+      }
+    }));
+
+    // AI analysis of top 5 — Kev's strategy applied
+    let analysis = "";
+    try {
+      const top5Str = enriched.slice(0, 5).map(g =>
+        `${g.symbol} (${g.name}): $${g.price} +${g.change_pct}% | Vol: ${g.volume_fmt} | Float: ${g.float ? g.float + "M" : "?"}\nCatalyst: ${g.catalyst || "no catalyst"}`
+      ).join("\n\n");
+
+      analysis = await groq(
+        `REAL top gainers right now:\n\n${top5Str}\n\n` +
+        `Apply Kev's S/D flip strategy. For each:\n` +
+        `- Which Kev setup does this fit? (SD flip / dip&rip / VWAP reclaim / AH gapper / 200MA)\n` +
+        `- Key entry level and target?\n` +
+        `- Conviction 1-10?\n\n` +
+        `End with: #1 PICK: [TICKER] — [one-line reason]`,
+        600
+      );
+    } catch (e) {
+      analysis = "AI analysis unavailable.";
+    }
+
+    res.json({
+      gainers:  enriched,
+      analysis: analysis,
+      scanned:  rawGainers.length,
+      ts:       new Date().toISOString(),
+    });
+
+  } catch (e) {
+    console.error("Movers error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// /api/news — news for a ticker or general market news
+// ════════════════════════════════════════════════════════════════════════════
+
+app.get("/api/news", async (req, res) => {
+  const { ticker } = req.query;
+  try {
+    const today = new Date().toISOString().split("T")[0];
+    const week  = new Date(Date.now() - 7 * 86400000).toISOString().split("T")[0];
+    const news  = ticker
+      ? await finnhub(`/company-news?symbol=${ticker.toUpperCase()}&from=${week}&to=${today}`)
+      : await finnhub("/news?category=general");
+    res.json((Array.isArray(news) ? news : []).slice(0, 20).map(n => ({
+      headline: n.headline,
+      summary:  n.summary || null,
+      source:   n.source,
+      url:      n.url,
+      datetime: n.datetime,
+      ticker:   ticker?.toUpperCase() || null,
+    })));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// REMAINING ROUTES (unchanged)
+// ════════════════════════════════════════════════════════════════════════════
 
 app.get("/api/spikes", async (req, res) => {
   try {
@@ -1045,18 +897,6 @@ app.get("/api/earnings", async (req, res) => {
     const list  = top.map(e => `${e.symbol}|${e.date}|EPS:${e.epsEstimate ?? "N/A"}`).join("\n");
     const ai    = await groq(`Earnings:\n${list || "No data"}\n\nWhich are Kev-style setups? S/D flip potential? Entry, target, stop.`);
     res.json({ calendar: top, ai_summary: ai, ts: new Date().toISOString() });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get("/api/news", async (req, res) => {
-  const { ticker } = req.query;
-  try {
-    const today = new Date().toISOString().split("T")[0];
-    const week  = new Date(Date.now() - 7 * 86400000).toISOString().split("T")[0];
-    const news  = ticker
-      ? await finnhub(`/company-news?symbol=${ticker.toUpperCase()}&from=${week}&to=${today}`)
-      : await finnhub("/news?category=general");
-    res.json((Array.isArray(news) ? news : []).slice(0, 15));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1154,8 +994,7 @@ app.delete("/api/trade/:id", async (req, res) => {
 app.get("/health", (_, res) => res.json({
   status: "ok", version: "9.0.0", ai: "groq-llama-3.3-70b", mode: "paper",
   strategy: "Kev (@trade.momentum) — S/D Flip + Dip&Rip + VWAP + L2 Order Flow",
-  auto_trader: autoTraderActive,
-  scanner: "Alpaca full market + Finnhub",
+  auto_trader: autoTraderActive, scanner: "Alpaca full market + Finnhub",
   brain_trades: BRAIN.totalTrades,
   win_rate: BRAIN.totalTrades > 0 ? ((BRAIN.wins / BRAIN.totalTrades) * 100).toFixed(1) + "%" : "learning",
   market_status: isOpen() ? "OPEN" : isPre() ? "PRE-MARKET" : "AFTER-HOURS",
