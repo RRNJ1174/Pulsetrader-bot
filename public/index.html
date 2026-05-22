@@ -1,525 +1,1483 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>PulseTrader</title>
-<link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/>
 <style>
-*{box-sizing:border-box;margin:0;padding:0;}
-:root{
-  --bg:#07080f;--surface:rgba(255,255,255,0.028);--border:rgba(255,255,255,0.07);
-  --green:#4effa0;--red:#ff4664;--yellow:#f5c33c;--blue:#38c8ff;
-  --text:#d8dcea;--muted:#2e3348;--font:'JetBrains Mono',monospace;
-}
-body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:100vh;}
-.hdr{position:sticky;top:0;z-index:99;backdrop-filter:blur(18px);
-  background:rgba(7,8,15,0.92);border-bottom:1px solid var(--border);
-  padding:12px 18px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;}
-.logo{font-family:'Syne',sans-serif;font-size:18px;font-weight:800;
-  background:linear-gradient(90deg,var(--green),var(--blue));
-  -webkit-background-clip:text;-webkit-text-fill-color:transparent;}
-.logo-sub{font-size:9px;color:var(--muted);letter-spacing:0.18em;}
-.account-bar{display:flex;gap:12px;align-items:center;font-size:11px;flex-wrap:wrap;}
-.account-bar span{color:var(--muted);}
-#eq-val{color:var(--green);font-weight:600;}
-#day-pnl{font-weight:600;}
-.bot-status-bar{width:100%;display:flex;align-items:center;gap:10px;padding:6px 18px;
-  background:rgba(78,255,160,0.04);border-bottom:1px solid rgba(78,255,160,0.08);font-size:11px;}
-.bot-dot{width:8px;height:8px;border-radius:50%;background:var(--muted);}
-.bot-dot.on{background:var(--green);box-shadow:0 0 6px var(--green);}
-.tabs{display:flex;gap:6px;padding:14px 18px 0;border-bottom:1px solid var(--border);overflow-x:auto;}
-.tab{padding:8px 14px;font-family:var(--font);font-size:11px;font-weight:600;
-  letter-spacing:0.06em;border:none;background:none;color:var(--muted);
-  cursor:pointer;border-bottom:2px solid transparent;transition:all .15s;white-space:nowrap;}
-.tab.on{color:var(--green);border-bottom-color:var(--green);}
-.panel{display:none;padding:16px;}
-.panel.on{display:block;}
-.cards{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;}
-.card{flex:1;min-width:100px;background:var(--surface);
-  border:1px solid var(--border);border-radius:11px;padding:13px 15px;}
-.card-lbl{font-size:9px;letter-spacing:0.17em;color:var(--muted);text-transform:uppercase;margin-bottom:6px;}
-.card-val{font-size:18px;font-weight:700;font-family:'Syne',sans-serif;}
-.card-sub{font-size:10px;color:var(--muted);margin-top:3px;}
-.tbl-wrap{overflow-x:auto;}
-table{width:100%;border-collapse:collapse;min-width:480px;}
-thead th{font-size:9px;letter-spacing:0.14em;color:var(--muted);text-transform:uppercase;
-  padding:8px 9px;text-align:left;border-bottom:1px solid var(--border);}
-tbody tr{border-bottom:1px solid rgba(255,255,255,0.024);transition:background .12s;}
-tbody tr:hover{background:rgba(255,255,255,0.018);}
-td{padding:10px 9px;font-size:12px;vertical-align:middle;}
-.bdg{display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;letter-spacing:.06em;}
-.bg{background:rgba(78,255,160,0.1);color:var(--green);}
-.br{background:rgba(255,70,100,0.1);color:var(--red);}
-.by{background:rgba(245,195,60,0.1);color:var(--yellow);}
-.bb{background:rgba(56,200,255,0.1);color:var(--blue);}
-.chat-wrap{display:flex;flex-direction:column;height:calc(100vh - 200px);}
-.quick-btns{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:10px;}
-.qbtn{background:var(--surface);border:1px solid var(--border);border-radius:8px;
-  padding:7px 12px;font-family:var(--font);font-size:11px;color:var(--text);
-  cursor:pointer;transition:all .15s;white-space:nowrap;}
-.qbtn:hover{border-color:var(--green);color:var(--green);}
-.qbtn.green{background:rgba(78,255,160,0.1);border-color:rgba(78,255,160,0.3);color:var(--green);}
-.qbtn.red{background:rgba(255,70,100,0.1);border-color:rgba(255,70,100,0.3);color:var(--red);}
-.qbtn.yellow{background:rgba(245,195,60,0.1);border-color:rgba(245,195,60,0.3);color:var(--yellow);}
-.messages{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:12px;padding:4px 0 12px;}
-.msg{max-width:90%;padding:11px 14px;border-radius:12px;font-size:13px;line-height:1.6;}
-.msg.user{align-self:flex-end;background:rgba(56,200,255,0.12);border:1px solid rgba(56,200,255,0.2);color:var(--text);}
-.msg.bot{align-self:flex-start;background:var(--surface);border:1px solid var(--border);color:var(--green);}
-.msg.bot .sender{font-size:9px;color:var(--muted);letter-spacing:0.14em;margin-bottom:5px;}
-.msg.bot .ts{font-size:10px;color:var(--muted);margin-top:5px;}
-.msg.loading{opacity:0.5;}
-.input-row{display:flex;gap:8px;margin-top:8px;}
-.chat-input{flex:1;background:var(--surface);border:1px solid var(--border);
-  border-radius:9px;padding:10px 14px;color:var(--text);font-family:var(--font);
-  font-size:13px;outline:none;transition:border-color .2s;}
-.chat-input:focus{border-color:rgba(78,255,160,0.35);}
-.send-btn{background:linear-gradient(135deg,var(--green),var(--blue));
-  border:none;border-radius:9px;padding:10px 18px;font-family:var(--font);
-  font-size:12px;font-weight:600;color:var(--bg);cursor:pointer;}
-.send-btn:disabled{opacity:.35;cursor:not-allowed;}
-.ai-output{background:var(--surface);border:1px solid var(--border);
-  border-radius:11px;padding:16px;font-size:13px;line-height:1.7;
-  color:var(--green);white-space:pre-wrap;min-height:100px;}
-.section-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px;}
-.section-title{font-size:11px;letter-spacing:0.14em;color:var(--muted);text-transform:uppercase;}
-.refresh-btn{background:none;border:1px solid var(--border);border-radius:6px;
-  padding:5px 12px;font-family:var(--font);font-size:10px;color:var(--muted);cursor:pointer;}
-.refresh-btn:hover{border-color:var(--green);color:var(--green);}
-.ticker-input{background:var(--surface);border:1px solid var(--border);
-  border-radius:7px;padding:7px 12px;color:var(--text);font-family:var(--font);
-  font-size:12px;outline:none;width:90px;margin-right:8px;}
-.go-btn{background:linear-gradient(135deg,var(--green),var(--blue));border:none;
-  border-radius:7px;padding:7px 14px;font-family:var(--font);font-size:11px;
-  font-weight:600;color:var(--bg);cursor:pointer;}
-.loading-txt{color:var(--muted);font-size:12px;padding:16px 0;}
-.empty-txt{color:var(--muted);font-size:12px;padding:24px 0;text-align:center;}
-.pnl-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px;}
-@media(min-width:480px){.pnl-grid{grid-template-columns:repeat(4,1fr);}}
-.bot-panel{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px;}
-@media(min-width:480px){.bot-panel{grid-template-columns:repeat(4,1fr);}}
-.trade-row-buy{color:var(--green);}
-.trade-row-sell{color:var(--yellow);}
-.trade-row-stop{color:var(--red);}
-::-webkit-scrollbar{width:4px;height:4px;}
-::-webkit-scrollbar-track{background:transparent;}
-::-webkit-scrollbar-thumb{background:var(--muted);border-radius:2px;}
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600;700&family=Exo+2:wght@300;400;600;700&display=swap');
+
+  :root {
+    --bg:       #020508;
+    --surface:  #060d14;
+    --card:     #0a1520;
+    --border:   #0e2035;
+    --border2:  #162840;
+    --green:    #00ff88;
+    --green2:   #00cc66;
+    --red:      #ff3355;
+    --red2:     #cc2244;
+    --yellow:   #ffcc00;
+    --blue:     #00aaff;
+    --cyan:     #00e5ff;
+    --dim:      #2a4a6a;
+    --text:     #c8d8e8;
+    --text2:    #5a7a9a;
+    --text3:    #3a5a7a;
+    --mono:     'Share Tech Mono', monospace;
+    --head:     'Rajdhani', sans-serif;
+    --body:     'Exo 2', sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--body);
+    font-size: 14px;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ── SCANLINE OVERLAY ── */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,255,136,0.015) 2px, rgba(0,255,136,0.015) 4px);
+    pointer-events: none; z-index: 9999;
+  }
+
+  /* ════════════════════════════════════
+     LOGIN SCREEN
+  ════════════════════════════════════ */
+  #login-screen {
+    position: fixed; inset: 0;
+    background: var(--bg);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    z-index: 1000; gap: 32px;
+    padding: 24px;
+  }
+  #login-screen.hidden { display: none; }
+
+  .login-logo {
+    text-align: center;
+  }
+  .login-logo .bolt {
+    font-size: 48px; line-height: 1;
+    color: var(--green);
+    filter: drop-shadow(0 0 20px var(--green));
+    animation: pulse-glow 2s ease-in-out infinite;
+  }
+  .login-logo h1 {
+    font-family: var(--head);
+    font-size: 36px; font-weight: 700;
+    letter-spacing: 4px;
+    color: var(--green);
+    text-shadow: 0 0 30px rgba(0,255,136,0.5);
+    margin-top: 8px;
+  }
+  .login-logo p {
+    font-family: var(--mono);
+    font-size: 10px; letter-spacing: 3px;
+    color: var(--text2); margin-top: 4px;
+  }
+
+  .login-box {
+    background: var(--card);
+    border: 1px solid var(--border2);
+    border-radius: 12px;
+    padding: 28px 24px;
+    width: 100%; max-width: 340px;
+    box-shadow: 0 0 40px rgba(0,255,136,0.05);
+  }
+  .login-box label {
+    font-family: var(--mono);
+    font-size: 10px; letter-spacing: 2px;
+    color: var(--text2); display: block;
+    margin-bottom: 10px;
+  }
+  .login-box input {
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border2);
+    border-radius: 8px;
+    color: var(--green);
+    font-family: var(--mono);
+    font-size: 20px;
+    letter-spacing: 6px;
+    padding: 14px 16px;
+    text-align: center;
+    outline: none;
+    transition: border-color .2s, box-shadow .2s;
+  }
+  .login-box input:focus {
+    border-color: var(--green);
+    box-shadow: 0 0 15px rgba(0,255,136,0.15);
+  }
+  .login-box input.error {
+    border-color: var(--red);
+    animation: shake .4s ease;
+  }
+  .login-btn {
+    width: 100%; margin-top: 16px;
+    background: var(--green);
+    color: var(--bg);
+    border: none; border-radius: 8px;
+    font-family: var(--head);
+    font-size: 16px; font-weight: 700;
+    letter-spacing: 3px; padding: 14px;
+    cursor: pointer;
+    transition: opacity .2s, transform .1s;
+  }
+  .login-btn:active { transform: scale(.97); opacity: .85; }
+  .login-err {
+    color: var(--red); font-family: var(--mono);
+    font-size: 11px; text-align: center;
+    margin-top: 10px; min-height: 16px;
+  }
+
+  /* ════════════════════════════════════
+     APP SHELL
+  ════════════════════════════════════ */
+  #app { display: none; flex-direction: column; height: 100vh; }
+  #app.visible { display: flex; }
+
+  /* ── TOP BAR ── */
+  .topbar {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 14px;
+    display: flex; align-items: center;
+    justify-content: space-between; flex-shrink: 0;
+  }
+  .topbar-left { display: flex; align-items: center; gap: 10px; }
+  .topbar-logo {
+    font-family: var(--head);
+    font-size: 20px; font-weight: 700;
+    letter-spacing: 2px; color: var(--green);
+    text-shadow: 0 0 15px rgba(0,255,136,0.4);
+  }
+  .topbar-logo span { color: var(--text2); font-weight: 400; }
+  .status-badge {
+    font-family: var(--mono); font-size: 9px;
+    letter-spacing: 1px; padding: 3px 8px;
+    border-radius: 20px; border: 1px solid;
+  }
+  .status-badge.running {
+    color: var(--green); border-color: var(--green);
+    background: rgba(0,255,136,0.07);
+    box-shadow: 0 0 8px rgba(0,255,136,0.15);
+  }
+  .status-badge.stopped { color: var(--red); border-color: var(--red); background: rgba(255,51,85,0.07); }
+
+  .topbar-right { text-align: right; }
+  .equity-val {
+    font-family: var(--mono);
+    font-size: 15px; color: var(--text);
+    font-weight: 600;
+  }
+  .pnl-today { font-family: var(--mono); font-size: 11px; }
+  .pnl-today.pos { color: var(--green); }
+  .pnl-today.neg { color: var(--red); }
+
+  /* ── MARKET STATUS BAR ── */
+  .market-bar {
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    padding: 6px 14px;
+    display: flex; align-items: center;
+    gap: 12px; overflow-x: auto;
+    scrollbar-width: none; flex-shrink: 0;
+  }
+  .market-bar::-webkit-scrollbar { display: none; }
+  .market-chip {
+    font-family: var(--mono); font-size: 10px;
+    letter-spacing: 1px; white-space: nowrap;
+    color: var(--text2);
+  }
+  .market-chip .dot {
+    display: inline-block; width: 6px; height: 6px;
+    border-radius: 50%; margin-right: 5px;
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green);
+    animation: pulse-glow 1.5s ease-in-out infinite;
+  }
+  .market-chip .dot.closed { background: var(--dim); box-shadow: none; animation: none; }
+
+  /* ── SCROLL AREA ── */
+  .scroll-area {
+    flex: 1; overflow-y: auto;
+    padding: 12px 12px 80px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border2) transparent;
+  }
+
+  /* ── BOTTOM NAV ── */
+  .bottom-nav {
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    display: flex; flex-shrink: 0;
+    position: sticky; bottom: 0;
+  }
+  .nav-tab {
+    flex: 1; display: flex;
+    flex-direction: column; align-items: center;
+    padding: 10px 4px 8px;
+    cursor: pointer; gap: 3px;
+    font-family: var(--head);
+    font-size: 10px; letter-spacing: .5px;
+    color: var(--text3); font-weight: 600;
+    border-top: 2px solid transparent;
+    transition: color .2s, border-color .2s;
+  }
+  .nav-tab .icon { font-size: 18px; line-height: 1; }
+  .nav-tab.active { color: var(--green); border-top-color: var(--green); }
+
+  /* ── TAB PANELS ── */
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* ════════════════════════════════════
+     CARDS & SHARED COMPONENTS
+  ════════════════════════════════════ */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+    margin-bottom: 10px;
+  }
+  .card-title {
+    font-family: var(--mono); font-size: 10px;
+    letter-spacing: 2px; color: var(--text2);
+    margin-bottom: 10px; text-transform: uppercase;
+  }
+
+  .stat-row {
+    display: grid; grid-template-columns: 1fr 1fr 1fr;
+    gap: 8px; margin-bottom: 10px;
+  }
+  .stat-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 8px;
+    text-align: center;
+  }
+  .stat-box .lbl {
+    font-family: var(--mono); font-size: 9px;
+    color: var(--text2); letter-spacing: 1px;
+    margin-bottom: 4px;
+  }
+  .stat-box .val {
+    font-family: var(--mono); font-size: 15px;
+    font-weight: 600; color: var(--text);
+  }
+  .stat-box .val.green { color: var(--green); }
+  .stat-box .val.red   { color: var(--red); }
+  .stat-box .val.yellow { color: var(--yellow); }
+
+  .btn {
+    font-family: var(--head); font-weight: 700;
+    font-size: 12px; letter-spacing: 1.5px;
+    padding: 10px 16px; border-radius: 8px;
+    border: 1px solid; cursor: pointer;
+    transition: opacity .2s, transform .1s;
+  }
+  .btn:active { transform: scale(.96); opacity: .8; }
+  .btn-green  { background: rgba(0,255,136,0.1); color: var(--green); border-color: var(--green); }
+  .btn-red    { background: rgba(255,51,85,0.1);  color: var(--red);   border-color: var(--red); }
+  .btn-blue   { background: rgba(0,170,255,0.1);  color: var(--blue);  border-color: var(--blue); }
+  .btn-dim    { background: var(--surface); color: var(--text2); border-color: var(--border2); }
+  .btn-row    { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  .tag {
+    font-family: var(--mono); font-size: 9px;
+    letter-spacing: 1px; padding: 3px 8px;
+    border-radius: 4px;
+  }
+  .tag-green { background: rgba(0,255,136,0.12); color: var(--green); }
+  .tag-red   { background: rgba(255,51,85,0.12);  color: var(--red); }
+  .tag-blue  { background: rgba(0,170,255,0.12);  color: var(--blue); }
+  .tag-yellow { background: rgba(255,204,0,0.12); color: var(--yellow); }
+  .tag-dim   { background: var(--surface); color: var(--text2); }
+
+  /* ════════════════════════════════════
+     BOT TAB
+  ════════════════════════════════════ */
+  .trade-row {
+    display: flex; align-items: center;
+    justify-content: space-between;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    gap: 8px;
+  }
+  .trade-row:last-child { border-bottom: none; }
+  .trade-sym {
+    font-family: var(--head); font-weight: 700;
+    font-size: 15px; color: var(--text);
+    min-width: 52px;
+  }
+  .trade-meta {
+    flex: 1; font-family: var(--mono);
+    font-size: 10px; color: var(--text2);
+    line-height: 1.6;
+  }
+  .trade-price {
+    font-family: var(--mono); font-size: 13px;
+    text-align: right;
+  }
+
+  /* ════════════════════════════════════
+     HOLDINGS TAB
+  ════════════════════════════════════ */
+  .holding-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px;
+    margin-bottom: 10px;
+  }
+  .holding-header {
+    display: flex; align-items: center;
+    justify-content: space-between; margin-bottom: 10px;
+  }
+  .holding-sym {
+    font-family: var(--head); font-weight: 700;
+    font-size: 20px; color: var(--text);
+  }
+  .holding-pnl {
+    font-family: var(--mono); font-size: 16px;
+    font-weight: 700;
+  }
+  .holding-grid {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+  .hg-item { font-family: var(--mono); font-size: 11px; }
+  .hg-item .k { color: var(--text2); }
+  .hg-item .v { color: var(--text); }
+  .progress-bar {
+    height: 4px; background: var(--border);
+    border-radius: 2px; overflow: hidden;
+    margin-top: 10px;
+  }
+  .progress-fill {
+    height: 100%; background: var(--green);
+    border-radius: 2px; transition: width .5s ease;
+    box-shadow: 0 0 6px var(--green);
+  }
+
+  /* Order Flow Mini Panel */
+  .of-panel {
+    background: var(--surface);
+    border: 1px solid var(--border2);
+    border-radius: 8px; padding: 10px;
+    margin-top: 10px;
+  }
+  .of-title {
+    font-family: var(--mono); font-size: 9px;
+    letter-spacing: 2px; color: var(--text3);
+    margin-bottom: 8px;
+  }
+  .of-row {
+    display: flex; justify-content: space-between;
+    align-items: center; margin-bottom: 6px;
+  }
+  .of-label { font-family: var(--mono); font-size: 10px; color: var(--text2); }
+  .of-val   { font-family: var(--mono); font-size: 11px; font-weight: 600; }
+  .buy-bar-wrap {
+    height: 6px; background: var(--border);
+    border-radius: 3px; overflow: hidden;
+    margin-top: 6px;
+  }
+  .buy-bar-fill {
+    height: 100%; border-radius: 3px;
+    transition: width .6s ease;
+  }
+
+  /* ════════════════════════════════════
+     MOVERS TAB
+  ════════════════════════════════════ */
+  .movers-header {
+    display: flex; justify-content: space-between;
+    align-items: center; margin-bottom: 10px;
+  }
+  .movers-title {
+    font-family: var(--mono); font-size: 10px;
+    letter-spacing: 2px; color: var(--text2);
+  }
+  .refresh-btn {
+    background: var(--surface);
+    border: 1px solid var(--border2);
+    color: var(--text2); border-radius: 6px;
+    font-family: var(--mono); font-size: 10px;
+    letter-spacing: 1px; padding: 6px 12px;
+    cursor: pointer;
+  }
+  .refresh-btn:active { opacity: .7; }
+
+  .ai-box {
+    background: rgba(0,170,255,0.05);
+    border: 1px solid rgba(0,170,255,0.2);
+    border-radius: 8px; padding: 12px;
+    margin-bottom: 12px;
+  }
+  .ai-box .ai-label {
+    font-family: var(--mono); font-size: 9px;
+    letter-spacing: 2px; color: var(--blue);
+    margin-bottom: 6px;
+  }
+  .ai-box .ai-text {
+    font-size: 12px; color: var(--text);
+    line-height: 1.6; white-space: pre-wrap;
+  }
+
+  .mover-row {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px; padding: 12px;
+    margin-bottom: 8px; cursor: pointer;
+    transition: border-color .2s;
+  }
+  .mover-row:active { border-color: var(--border2); opacity: .85; }
+  .mover-top {
+    display: flex; justify-content: space-between;
+    align-items: flex-start; margin-bottom: 6px;
+  }
+  .mover-sym {
+    font-family: var(--head); font-size: 18px;
+    font-weight: 700; color: var(--text);
+  }
+  .mover-name {
+    font-size: 11px; color: var(--text2);
+    margin-top: 1px; max-width: 180px;
+    overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .mover-right { text-align: right; }
+  .mover-pct {
+    font-family: var(--mono); font-size: 20px;
+    font-weight: 700; color: var(--green);
+    text-shadow: 0 0 10px rgba(0,255,136,0.3);
+  }
+  .mover-price {
+    font-family: var(--mono); font-size: 12px;
+    color: var(--text2); margin-top: 1px;
+  }
+  .mover-meta {
+    display: flex; gap: 6px; flex-wrap: wrap;
+    align-items: center;
+  }
+  .mover-catalyst {
+    font-size: 11px; color: var(--text2);
+    line-height: 1.4; margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+  }
+
+  /* Expandable detail */
+  .mover-detail {
+    display: none; margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border2);
+  }
+  .mover-detail.open { display: block; }
+  .detail-section { margin-bottom: 10px; }
+  .detail-title {
+    font-family: var(--mono); font-size: 9px;
+    letter-spacing: 2px; color: var(--text3);
+    margin-bottom: 6px;
+  }
+  .of-grid {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+  .of-item {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px;
+  }
+  .of-item .ok  { color: var(--green); }
+  .of-item .bad { color: var(--red); }
+  .of-item .neu { color: var(--yellow); }
+
+  .news-item {
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .news-item:last-child { border-bottom: none; }
+  .news-hl {
+    font-size: 12px; color: var(--text);
+    line-height: 1.4; margin-bottom: 3px;
+  }
+  .news-src {
+    font-family: var(--mono); font-size: 10px;
+    color: var(--text3);
+  }
+
+  /* ════════════════════════════════════
+     NEWS TAB
+  ════════════════════════════════════ */
+  .news-filter {
+    display: flex; gap: 8px; margin-bottom: 12px;
+    overflow-x: auto; scrollbar-width: none;
+    padding-bottom: 4px;
+  }
+  .news-filter::-webkit-scrollbar { display: none; }
+  .filter-chip {
+    font-family: var(--mono); font-size: 10px;
+    letter-spacing: 1px; padding: 6px 12px;
+    border-radius: 20px; border: 1px solid var(--border2);
+    color: var(--text2); background: var(--surface);
+    white-space: nowrap; cursor: pointer;
+    flex-shrink: 0; transition: .2s;
+  }
+  .filter-chip.active {
+    border-color: var(--green); color: var(--green);
+    background: rgba(0,255,136,0.07);
+  }
+  .news-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px;
+    margin-bottom: 8px;
+  }
+  .news-card-headline {
+    font-size: 14px; color: var(--text);
+    line-height: 1.5; margin-bottom: 8px;
+    font-weight: 500;
+  }
+  .news-card-footer {
+    display: flex; justify-content: space-between;
+    align-items: center;
+  }
+  .news-card-source {
+    font-family: var(--mono); font-size: 10px;
+    color: var(--text3);
+  }
+  .news-card-time {
+    font-family: var(--mono); font-size: 10px;
+    color: var(--text3);
+  }
+
+  /* ════════════════════════════════════
+     P&L TAB
+  ════════════════════════════════════ */
+  .pnl-big {
+    font-family: var(--mono); font-size: 36px;
+    font-weight: 700; text-align: center;
+    padding: 20px 0 8px;
+    text-shadow: 0 0 20px currentColor;
+  }
+  .pnl-big.pos { color: var(--green); }
+  .pnl-big.neg { color: var(--red); }
+
+  .trade-hist-row {
+    display: flex; align-items: center;
+    justify-content: space-between;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .trade-hist-row:last-child { border-bottom: none; }
+  .hist-sym {
+    font-family: var(--head); font-weight: 700;
+    font-size: 15px;
+  }
+  .hist-setup {
+    font-family: var(--mono); font-size: 10px;
+    color: var(--text2); margin-top: 2px;
+  }
+  .hist-pnl {
+    font-family: var(--mono); font-size: 14px;
+    font-weight: 700; text-align: right;
+  }
+  .hist-date {
+    font-family: var(--mono); font-size: 10px;
+    color: var(--text3); margin-top: 2px;
+    text-align: right;
+  }
+
+  /* ════════════════════════════════════
+     LOADING / EMPTY
+  ════════════════════════════════════ */
+  .loading {
+    text-align: center; padding: 40px 20px;
+    font-family: var(--mono); font-size: 11px;
+    color: var(--text2); letter-spacing: 2px;
+  }
+  .loading::after {
+    content: ''; display: block; width: 32px;
+    height: 2px; background: var(--green);
+    margin: 12px auto 0;
+    animation: scan-line 1.2s ease-in-out infinite;
+    box-shadow: 0 0 8px var(--green);
+  }
+  .empty {
+    text-align: center; padding: 40px 20px;
+    font-family: var(--mono); font-size: 11px;
+    color: var(--text3); letter-spacing: 1px;
+  }
+
+  /* ════════════════════════════════════
+     ANIMATIONS
+  ════════════════════════════════════ */
+  @keyframes pulse-glow {
+    0%, 100% { opacity: 1; }
+    50% { opacity: .5; }
+  }
+  @keyframes scan-line {
+    0%   { transform: scaleX(0); opacity: 0; }
+    50%  { transform: scaleX(1); opacity: 1; }
+    100% { transform: scaleX(0); opacity: 0; }
+  }
+  @keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    20% { transform: translateX(-8px); }
+    40% { transform: translateX(8px); }
+    60% { transform: translateX(-4px); }
+    80% { transform: translateX(4px); }
+  }
+  @keyframes fade-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .fade-in { animation: fade-in .3s ease forwards; }
+
+  /* ════════════════════════════════════
+     MISC
+  ════════════════════════════════════ */
+  .divider {
+    height: 1px; background: var(--border);
+    margin: 10px 0;
+  }
+  .flex-between {
+    display: flex; justify-content: space-between;
+    align-items: center;
+  }
+  .lessons-list { list-style: none; }
+  .lessons-list li {
+    font-family: var(--mono); font-size: 11px;
+    color: var(--text2); padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+    line-height: 1.5;
+  }
+  .lessons-list li:last-child { border-bottom: none; }
+  .lessons-list li::before { content: '▸ '; color: var(--green); }
+
+  a { color: var(--blue); text-decoration: none; }
 </style>
 </head>
 <body>
 
-<!-- HEADER -->
-<div class="hdr">
-  <div>
-    <div class="logo">⚡ PulseTrader</div>
-    <div class="logo-sub">PAPER TRADING</div>
+<!-- ══════════════════════════════════════
+     LOGIN SCREEN
+══════════════════════════════════════ -->
+<div id="login-screen">
+  <div class="login-logo">
+    <div class="bolt">⚡</div>
+    <h1>PULSETRADER</h1>
+    <p>PAPER TRADING · KEV'S STRATEGY · ORDER FLOW</p>
   </div>
-  <div class="account-bar">
-    <div><span>Equity </span><strong id="eq-val">—</strong></div>
-    <div><span>Today </span><strong id="day-pnl">—</strong></div>
-    <div><span>Cash </span><strong id="cash-val">—</strong></div>
+  <div class="login-box">
+    <label>ENTER PASSCODE</label>
+    <input type="password" id="passcode-input" maxlength="20" placeholder="••••••••" autocomplete="off">
+    <button class="login-btn" id="login-btn">AUTHENTICATE</button>
+    <div class="login-err" id="login-err"></div>
   </div>
 </div>
 
-<!-- BOT STATUS BAR -->
-<div class="bot-status-bar">
-  <div class="bot-dot" id="bot-dot"></div>
-  <span id="bot-status-txt" style="color:var(--muted)">Auto-trader: OFF</span>
-  <span id="bot-scan-txt" style="color:var(--muted);margin-left:auto;font-size:10px"></span>
-</div>
-
-<!-- TABS -->
-<div class="tabs">
-  <button class="tab on"  onclick="showTab('chat',this)">💬 Chat</button>
-  <button class="tab"     onclick="showTab('bot',this)">🤖 Bot</button>
-  <button class="tab"     onclick="showTab('holdings',this)">📊 Holdings</button>
-  <button class="tab"     onclick="showTab('pnl',this)">💰 P&L</button>
-  <button class="tab"     onclick="showTab('movers',this)">🔥 Movers</button>
-  <button class="tab"     onclick="showTab('edgar',this)">📋 EDGAR</button>
-  <button class="tab"     onclick="showTab('earnings',this)">📅 Earnings</button>
-</div>
-
-<!-- CHAT -->
-<div id="tab-chat" class="panel on">
-  <div class="chat-wrap">
-    <div class="quick-btns">
-      <button class="qbtn green" onclick="startBot()">🤖 Start Bot</button>
-      <button class="qbtn red"   onclick="stopBot()">⏹ Stop Bot</button>
-      <button class="qbtn yellow" onclick="showTab('bot',null);loadBotStatus()">📊 Bot Status</button>
-      <button class="qbtn" onclick="quickSend('show movers')">🔥 Movers</button>
-      <button class="qbtn" onclick="quickSend('find pre-spike setups right now')">⚡ Spikes</button>
-      <button class="qbtn" onclick="quickSend('earnings this week')">📅 Earnings</button>
-      <button class="qbtn" onclick="quickSend('market news today')">📰 News</button>
+<!-- ══════════════════════════════════════
+     MAIN APP
+══════════════════════════════════════ -->
+<div id="app">
+  <!-- Top Bar -->
+  <div class="topbar">
+    <div class="topbar-left">
+      <div class="topbar-logo">⚡ PULSE<span>TRADER</span></div>
+      <div class="status-badge" id="status-badge">LOADING</div>
     </div>
-    <div class="messages" id="messages">
-      <div class="msg bot">
-        <div class="sender">PULSETRADER</div>
-        Welcome back. Auto-trader scans 100 small caps every 5 min, buys spikes, sells at +25%. Tap 🤖 Start Bot to activate. Trap money don't sleep 💰
-        <div class="ts">Just now</div>
+    <div class="topbar-right">
+      <div class="equity-val" id="equity-display">—</div>
+      <div class="pnl-today" id="pnl-display">—</div>
+    </div>
+  </div>
+
+  <!-- Market Bar -->
+  <div class="market-bar">
+    <span class="market-chip"><span class="dot" id="market-dot"></span><span id="market-status-text">LOADING</span></span>
+    <span class="market-chip" id="scan-time-chip">LAST SCAN: —</span>
+    <span class="market-chip" id="spy-chip">SPY —</span>
+    <span class="market-chip" id="brain-chip">BRAIN: 0 TRADES</span>
+  </div>
+
+  <!-- Scroll Area -->
+  <div class="scroll-area" id="scroll-area">
+    <!-- Bot Tab -->
+    <div class="tab-panel active" id="tab-bot">
+      <div id="bot-content"><div class="loading">LOADING BOT STATUS</div></div>
+    </div>
+    <!-- Holdings Tab -->
+    <div class="tab-panel" id="tab-holdings">
+      <div id="holdings-content"><div class="loading">LOADING HOLDINGS</div></div>
+    </div>
+    <!-- P&L Tab -->
+    <div class="tab-panel" id="tab-pnl">
+      <div id="pnl-content"><div class="loading">LOADING P&L</div></div>
+    </div>
+    <!-- Movers Tab -->
+    <div class="tab-panel" id="tab-movers">
+      <div class="movers-header">
+        <span class="movers-title">🔥 SPIKE SCANNER</span>
+        <button class="refresh-btn" id="movers-refresh-btn">↺ REFRESH</button>
       </div>
+      <div id="movers-content"><div class="loading">SCANNING MARKET</div></div>
     </div>
-    <div class="input-row">
-      <input class="chat-input" id="chat-input" placeholder="Ask PulseTrader anything..."
-        onkeydown="if(event.key==='Enter')sendMsg()"/>
-      <button class="send-btn" id="send-btn" onclick="sendMsg()">Send</button>
-    </div>
-  </div>
-</div>
-
-<!-- BOT CONTROL -->
-<div id="tab-bot" class="panel">
-  <div class="bot-panel" id="bot-cards">
-    <div class="card"><div class="card-lbl">Status</div><div class="card-val" id="bc-status" style="color:var(--muted)">—</div></div>
-    <div class="card"><div class="card-lbl">Positions</div><div class="card-val" id="bc-pos">—</div></div>
-    <div class="card"><div class="card-lbl">Today P&L</div><div class="card-val" id="bc-pnl">—</div></div>
-    <div class="card"><div class="card-lbl">Cash</div><div class="card-val" id="bc-cash">—</div></div>
-  </div>
-
-  <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
-    <button onclick="startBot()" style="flex:1;background:linear-gradient(135deg,var(--green),var(--blue));border:none;border-radius:8px;padding:12px;font-family:var(--font);font-size:13px;font-weight:700;color:var(--bg);cursor:pointer;">
-      🚀 START AUTO TRADER
-    </button>
-    <button onclick="stopBot()" style="flex:1;background:rgba(255,70,100,0.1);border:1px solid rgba(255,70,100,0.3);border-radius:8px;padding:12px;font-family:var(--font);font-size:13px;font-weight:700;color:var(--red);cursor:pointer;">
-      ⏹ STOP
-    </button>
-    <button onclick="forceScan()" style="flex:1;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:var(--font);font-size:13px;color:var(--text);cursor:pointer;">
-      🔍 Force Scan
-    </button>
-    <button onclick="sellAll()" style="flex:1;background:rgba(245,195,60,0.1);border:1px solid rgba(245,195,60,0.3);border-radius:8px;padding:12px;font-family:var(--font);font-size:13px;color:var(--yellow);cursor:pointer;">
-      💸 Sell All
-    </button>
-  </div>
-
-  <div style="background:var(--surface);border:1px solid var(--border);border-radius:11px;padding:14px;margin-bottom:14px;font-size:11px;color:var(--muted);">
-    <div style="color:var(--green);font-size:10px;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:10px;">⚙️ Config</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-      <div>Profit Target: <span style="color:var(--green)" id="cfg-target">+25%</span></div>
-      <div>Stop Loss: <span style="color:var(--red)" id="cfg-stop">-10%</span></div>
-      <div>Position Size: <span style="color:var(--text)" id="cfg-size">$1,000</span></div>
-      <div>Max Positions: <span style="color:var(--text)" id="cfg-max">5</span></div>
+    <!-- News Tab -->
+    <div class="tab-panel" id="tab-news">
+      <div class="news-filter" id="news-filter">
+        <div class="filter-chip active" data-ticker="">📰 MARKET</div>
+      </div>
+      <div id="news-content"><div class="loading">FETCHING NEWS</div></div>
     </div>
   </div>
 
-  <div class="section-hdr">
-    <span class="section-title">Recent Bot Trades</span>
-    <button class="refresh-btn" onclick="loadBotStatus()">↻ Refresh</button>
-  </div>
-  <div id="bot-trades"><div class="empty-txt">No trades yet — start the bot to begin</div></div>
-</div>
-
-<!-- HOLDINGS -->
-<div id="tab-holdings" class="panel">
-  <div class="cards">
-    <div class="card"><div class="card-lbl">Portfolio Value</div><div class="card-val" id="h-value">—</div></div>
-    <div class="card"><div class="card-lbl">Unrealized P&L</div><div class="card-val" id="h-pnl">—</div></div>
-    <div class="card"><div class="card-lbl">Today P&L</div><div class="card-val" id="h-today">—</div></div>
-    <div class="card"><div class="card-lbl">Positions</div><div class="card-val" id="h-count">—</div></div>
-  </div>
-  <div class="tbl-wrap">
-    <table>
-      <thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>Value</th><th>P&L</th><th>Target</th><th>Stop</th></tr></thead>
-      <tbody id="holdings-body"><tr><td colspan="9" class="empty-txt">Loading...</td></tr></tbody>
-    </table>
-  </div>
-</div>
-
-<!-- P&L -->
-<div id="tab-pnl" class="panel">
-  <div class="pnl-grid" id="pnl-cards"></div>
-  <div class="section-hdr"><span class="section-title">Recent Trades</span></div>
-  <div class="tbl-wrap">
-    <table>
-      <thead><tr><th>Date</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&L $</th><th>P&L %</th><th>Reason</th></tr></thead>
-      <tbody id="pnl-body"><tr><td colspan="9" class="empty-txt">Loading...</td></tr></tbody>
-    </table>
-  </div>
-</div>
-
-<!-- MOVERS -->
-<div id="tab-movers" class="panel">
-  <div class="section-hdr">
-    <span class="section-title">🔥 Spike Scanner</span>
-    <button class="refresh-btn" onclick="loadMovers()">↻ Refresh</button>
-  </div>
-  <div class="ai-output" id="movers-out"><span class="loading-txt">Scanning 100 small caps...</span></div>
-</div>
-
-<!-- EDGAR -->
-<div id="tab-edgar" class="panel">
-  <div class="section-hdr">
-    <span class="section-title">📋 Stock Analysis</span>
-    <div>
-      <input class="ticker-input" id="edgar-ticker" placeholder="NVDA" maxlength="6"/>
-      <button class="go-btn" onclick="loadEdgar()">Analyze</button>
+  <!-- Bottom Nav -->
+  <nav class="bottom-nav">
+    <div class="nav-tab active" data-tab="bot">
+      <span class="icon">🤖</span>Bot
     </div>
-  </div>
-  <div class="ai-output" id="edgar-out"><span class="loading-txt">Enter a ticker to analyze spike potential.</span></div>
-</div>
-
-<!-- EARNINGS -->
-<div id="tab-earnings" class="panel">
-  <div class="section-hdr">
-    <span class="section-title">📅 Earnings Calendar</span>
-    <button class="refresh-btn" onclick="loadEarnings()">↻ Refresh</button>
-  </div>
-  <div class="ai-output" id="earnings-out"><span class="loading-txt">Loading earnings...</span></div>
+    <div class="nav-tab" data-tab="holdings">
+      <span class="icon">📊</span>Holdings
+    </div>
+    <div class="nav-tab" data-tab="pnl">
+      <span class="icon">💰</span>P&amp;L
+    </div>
+    <div class="nav-tab" data-tab="movers">
+      <span class="icon">🔥</span>Movers
+    </div>
+    <div class="nav-tab" data-tab="news">
+      <span class="icon">📰</span>News
+    </div>
+  </nav>
 </div>
 
 <script>
-const chatHistory = [];
+// ══════════════════════════════════════
+// AUTH
+// ══════════════════════════════════════
+let AUTH_TOKEN = sessionStorage.getItem('pt_token') || '';
 
-const pc  = v => parseFloat(v)>0 ? "var(--green)" : parseFloat(v)<0 ? "var(--red)" : "var(--muted)";
-const fmt = (v,d=2) => v==null ? "—" : Number(v).toLocaleString("en-US",{minimumFractionDigits:d,maximumFractionDigits:d});
-const sgn = v => parseFloat(v)>0 ? "+" : "";
-const ts  = () => new Date().toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"});
+const api = async (path, opts = {}) => {
+  const res = await fetch(path, {
+    ...opts,
+    headers: {
+      'Content-Type': 'application/json',
+      'x-auth-token': AUTH_TOKEN,
+      ...(opts.headers || {}),
+    },
+  });
+  if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
+  return res.json();
+};
 
-function showTab(name, btn) {
-  document.querySelectorAll(".panel").forEach(p=>p.classList.remove("on"));
-  document.querySelectorAll(".tab").forEach(t=>t.classList.remove("on"));
-  document.getElementById("tab-"+name).classList.add("on");
-  if (btn) btn.classList.add("on");
-  if (name==="holdings") loadHoldings();
-  if (name==="pnl")      loadPnL();
-  if (name==="movers")   loadMovers();
-  if (name==="earnings") loadEarnings();
-  if (name==="bot")      loadBotStatus();
-}
+const logout = () => {
+  sessionStorage.removeItem('pt_token');
+  AUTH_TOKEN = '';
+  document.getElementById('login-screen').classList.remove('hidden');
+  document.getElementById('app').classList.remove('visible');
+};
 
-// ── Account bar ───────────────────────────────────────────────────────────
-async function loadAccount() {
+// ── Login flow ──
+const loginScreen = document.getElementById('login-screen');
+const appEl       = document.getElementById('app');
+const passInput   = document.getElementById('passcode-input');
+const loginBtn    = document.getElementById('login-btn');
+const loginErr    = document.getElementById('login-err');
+
+const doLogin = async () => {
+  const passcode = passInput.value.trim();
+  if (!passcode) return;
+  loginBtn.textContent = 'AUTHENTICATING...';
+  loginBtn.disabled = true;
   try {
-    const d = await fetch("/api/account").then(r=>r.json());
-    document.getElementById("eq-val").textContent   = "$"+fmt(d.equity);
-    document.getElementById("cash-val").textContent = "$"+fmt(d.cash);
-    const dp  = document.getElementById("day-pnl");
-    const val = parseFloat(d.pnl_today);
-    dp.textContent  = (val>=0?"+$":"-$")+fmt(Math.abs(val))+" ("+d.pnl_today_pct+")";
-    dp.style.color  = val>=0 ? "var(--green)" : "var(--red)";
-  } catch(e) {}
-}
-
-// ── Bot controls ─────────────────────────────────────────────────────────
-async function startBot() {
-  try {
-    const d = await fetch("/api/autotrader/start",{method:"POST"}).then(r=>r.json());
-    appendMsg("bot", "🤖 Auto-trader STARTED! Scanning 100 small caps every 5 min. Target: +25% | Stop: -10%\n\nWill buy HIGH conviction spike setups automatically. Check Bot tab for live trades. 💰");
-    updateBotBar(true);
-    loadBotStatus();
-  } catch(e) { appendMsg("bot","Failed to start bot: "+e.message); }
-}
-
-async function stopBot() {
-  try {
-    await fetch("/api/autotrader/stop",{method:"POST"}).then(r=>r.json());
-    appendMsg("bot","⏹ Auto-trader stopped. Open positions will stay open until you sell manually.");
-    updateBotBar(false);
-  } catch(e) {}
-}
-
-async function forceScan() {
-  appendMsg("bot","🔍 Forcing scan right now...");
-  await fetch("/api/autotrader/scan",{method:"POST"});
-  setTimeout(loadBotStatus, 8000);
-}
-
-async function sellAll() {
-  if (!confirm("Sell ALL positions now?")) return;
-  const d = await fetch("/api/autotrader/sellall",{method:"POST"}).then(r=>r.json());
-  appendMsg("bot","💸 Selling all positions: "+d.message);
-  setTimeout(loadHoldings, 3000);
-}
-
-function updateBotBar(active) {
-  document.getElementById("bot-dot").className = "bot-dot"+(active?" on":"");
-  document.getElementById("bot-status-txt").textContent = active ? "Auto-trader: RUNNING 🟢" : "Auto-trader: OFF";
-  document.getElementById("bot-status-txt").style.color = active ? "var(--green)" : "var(--muted)";
-}
-
-async function loadBotStatus() {
-  try {
-    const d = await fetch("/api/autotrader/status").then(r=>r.json());
-    updateBotBar(d.active);
-
-    document.getElementById("bc-status").textContent  = d.active ? "RUNNING" : "STOPPED";
-    document.getElementById("bc-status").style.color  = d.active ? "var(--green)" : "var(--red)";
-    document.getElementById("bc-pos").textContent     = d.open_positions+"/"+d.max_positions;
-    document.getElementById("bc-cash").textContent    = "$"+fmt(d.cash);
-    document.getElementById("cfg-target").textContent = "+"+d.profit_target;
-    document.getElementById("cfg-stop").textContent   = "-"+d.stop_loss;
-
-    const pnlEl = document.getElementById("bc-pnl");
-    const pval  = parseFloat(d.today_pnl||0);
-    pnlEl.textContent = (pval>=0?"+$":"-$")+fmt(Math.abs(pval));
-    pnlEl.style.color = pc(pval);
-
-    if (d.last_scan) {
-      document.getElementById("bot-scan-txt").textContent =
-        "Last scan: "+new Date(d.last_scan).toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"});
-    }
-
-    if (d.recent_trades?.length) {
-      document.getElementById("bot-trades").innerHTML =
-        `<table><thead><tr><th>Time</th><th>Type</th><th>Symbol</th><th>Price</th><th>P&L</th><th>Reason</th></tr></thead><tbody>` +
-        d.recent_trades.map(t => `<tr>
-          <td style="color:var(--muted);font-size:10px">${new Date(t.ts).toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"})}</td>
-          <td><span class="bdg ${t.type==="BUY"?"bg":t.type==="SELL"?"by":"br"}">${t.type}</span></td>
-          <td style="font-weight:600">${t.symbol}</td>
-          <td style="color:var(--text)">$${fmt(t.price)}</td>
-          <td style="color:${pc(t.pnlPct||0)}">${t.pnlPct ? (t.pnlPct>0?"+":"")+t.pnlPct+"%" : "—"}</td>
-          <td style="color:var(--muted);font-size:10px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.reason||"—"}</td>
-        </tr>`).join("") +
-        `</tbody></table>`;
-    } else {
-      document.getElementById("bot-trades").innerHTML =
-        `<div class="empty-txt">No trades yet — tap START AUTO TRADER above</div>`;
-    }
-  } catch(e) { console.warn("Bot status error",e); }
-}
-
-// ── Holdings ───────────────────────────────────────────────────────────────
-async function loadHoldings() {
-  document.getElementById("holdings-body").innerHTML = `<tr><td colspan="9" class="empty-txt">Loading from Alpaca...</td></tr>`;
-  try {
-    const d = await fetch("/api/holdings").then(r=>r.json());
-    document.getElementById("h-value").textContent = "$"+fmt(d.total_value);
-    document.getElementById("h-count").textContent = d.count;
-    const pe = document.getElementById("h-pnl");
-    pe.textContent = (parseFloat(d.total_pnl)>=0?"+$":"-$")+fmt(Math.abs(d.total_pnl));
-    pe.style.color = pc(d.total_pnl);
-    const te = document.getElementById("h-today");
-    te.textContent = (parseFloat(d.total_pnl_today)>=0?"+$":"-$")+fmt(Math.abs(d.total_pnl_today));
-    te.style.color = pc(d.total_pnl_today);
-    if (!d.holdings?.length) {
-      document.getElementById("holdings-body").innerHTML = `<tr><td colspan="9" class="empty-txt">No open positions</td></tr>`;
+    const res = await fetch('/api/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ passcode }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.token) {
+      loginErr.textContent = data.error || 'WRONG PASSCODE';
+      passInput.classList.add('error');
+      setTimeout(() => passInput.classList.remove('error'), 500);
+      loginBtn.textContent = 'AUTHENTICATE';
+      loginBtn.disabled = false;
+      passInput.value = '';
       return;
     }
-    document.getElementById("holdings-body").innerHTML = d.holdings.map(h=>`<tr>
-      <td style="font-weight:600">${h.symbol}</td>
-      <td><span class="bdg ${h.side==="long"?"bg":"br"}">${h.side.toUpperCase()}</span></td>
-      <td style="color:var(--muted)">${h.qty}</td>
-      <td style="color:#777">$${h.avg_entry}</td>
-      <td style="font-weight:600">$${h.current_price}</td>
-      <td style="color:#777">$${fmt(h.market_value)}</td>
-      <td style="color:${pc(h.unrealized_pnl)};font-weight:600">${sgn(h.unrealized_pnl)}$${fmt(Math.abs(h.unrealized_pnl))}<br><span style="font-size:10px">${h.unrealized_pnl_pct}</span></td>
-      <td style="color:var(--green);font-size:11px">$${h.target_price}</td>
-      <td style="color:var(--red);font-size:11px">$${h.stop_price}</td>
-    </tr>`).join("");
-  } catch(e) {
-    document.getElementById("holdings-body").innerHTML = `<tr><td colspan="9" class="empty-txt">Failed to load</td></tr>`;
+    AUTH_TOKEN = data.token;
+    sessionStorage.setItem('pt_token', AUTH_TOKEN);
+    loginScreen.classList.add('hidden');
+    appEl.classList.add('visible');
+    initApp();
+  } catch (e) {
+    loginErr.textContent = 'CONNECTION ERROR';
+    loginBtn.textContent = 'AUTHENTICATE';
+    loginBtn.disabled = false;
   }
-}
+};
 
-// ── P&L ────────────────────────────────────────────────────────────────────
-async function loadPnL() {
+loginBtn.addEventListener('click', doLogin);
+passInput.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+
+// Check existing token on load
+const checkToken = async () => {
+  if (!AUTH_TOKEN) return;
   try {
-    const d = await fetch("/api/pnl").then(r=>r.json());
-    const s = d.summary;
-    document.getElementById("pnl-cards").innerHTML = `
-      <div class="card"><div class="card-lbl">Total P&L</div><div class="card-val" style="color:${pc(s.total_pnl)}">${sgn(s.total_pnl)}$${fmt(Math.abs(s.total_pnl))}</div><div class="card-sub">${s.closed} closed</div></div>
-      <div class="card"><div class="card-lbl">Win Rate</div><div class="card-val" style="color:${parseFloat(s.win_rate)>=50?"var(--green)":"var(--red)"}">${s.win_rate}</div><div class="card-sub">${s.winners}W/${s.losers}L</div></div>
-      <div class="card"><div class="card-lbl">Avg P&L</div><div class="card-val" style="color:${pc(s.avg_pnl)}">${sgn(s.avg_pnl)}$${fmt(Math.abs(s.avg_pnl))}</div><div class="card-sub">per trade</div></div>
-      <div class="card"><div class="card-lbl">Open</div><div class="card-val" style="color:var(--yellow)">${s.open}</div><div class="card-sub">active</div></div>`;
-    document.getElementById("pnl-body").innerHTML = d.recent.map(t=>{
-      const isOpen = t.pnl==null;
-      return `<tr>
-        <td style="color:var(--muted);font-size:10px">${new Date(t.created_at).toLocaleDateString("en-US",{month:"short",day:"numeric"})}</td>
-        <td style="font-weight:600">${t.symbol}</td>
-        <td><span class="bdg ${t.side==="LONG"?"bg":"br"}">${t.side}</span></td>
-        <td style="color:var(--muted)">${t.qty}</td>
-        <td style="color:#777">$${fmt(t.entry_price)}</td>
-        <td>${t.exit_price?"$"+fmt(t.exit_price):'<span class="bdg by">OPEN</span>'}</td>
-        <td style="color:${pc(t.pnl)};font-weight:600">${isOpen?"—":sgn(t.pnl)+"$"+fmt(Math.abs(t.pnl))}</td>
-        <td style="color:${pc(t.pnl_pct)}">${isOpen?"—":sgn(t.pnl_pct)+fmt(t.pnl_pct)+"%"}</td>
-        <td style="color:var(--muted);font-size:10px;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.reason||"—"}</td>
-      </tr>`;
-    }).join("") || `<tr><td colspan="9" class="empty-txt">No trades yet</td></tr>`;
-  } catch(e) {}
-}
+    const r = await fetch('/api/autotrader/status', { headers: { 'x-auth-token': AUTH_TOKEN } });
+    if (r.status === 401) { AUTH_TOKEN = ''; sessionStorage.removeItem('pt_token'); return; }
+    loginScreen.classList.add('hidden');
+    appEl.classList.add('visible');
+    initApp();
+  } catch (_) {}
+};
+checkToken();
 
-// ── Movers ─────────────────────────────────────────────────────────────────
-async function loadMovers() {
-  const el = document.getElementById("movers-out");
-  el.innerHTML = `<span class="loading-txt">⚡ Scanning 100 small caps for spikes...</span>`;
+// ══════════════════════════════════════
+// NAV TABS
+// ══════════════════════════════════════
+let activeTab = 'bot';
+document.querySelectorAll('.nav-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    const t = tab.dataset.tab;
+    document.querySelectorAll('.nav-tab').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(x => x.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('tab-' + t).classList.add('active');
+    document.getElementById('scroll-area').scrollTop = 0;
+    activeTab = t;
+    if (t === 'movers' && !moversLoaded) loadMovers();
+    if (t === 'news'   && !newsLoaded)   loadNews('');
+    if (t === 'holdings') loadHoldings();
+    if (t === 'pnl')      loadPnL();
+  });
+});
+
+// ══════════════════════════════════════
+// STATUS POLLING
+// ══════════════════════════════════════
+let statusData   = null;
+let moversLoaded = false;
+let newsLoaded   = false;
+
+const loadStatus = async () => {
   try {
-    const d = await fetch("/api/movers").then(r=>r.json());
-    el.textContent = d.data || "No data.";
-    if (d.scanned) el.textContent += `\n\n[Scanned ${d.scanned} tickers]`;
-  } catch(e) { el.textContent = "Scan failed."; }
-}
+    const d = await api('/api/autotrader/status');
+    statusData = d;
 
-// ── EDGAR ──────────────────────────────────────────────────────────────────
-async function loadEdgar() {
-  const ticker = document.getElementById("edgar-ticker").value.trim().toUpperCase() || "NVDA";
-  const el = document.getElementById("edgar-out");
-  el.innerHTML = `<span class="loading-txt">⚡ Analyzing ${ticker}...</span>`;
+    // Top bar
+    const eq = parseFloat(d.equity);
+    document.getElementById('equity-display').textContent = eq ? '$' + eq.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
+    const pnl = parseFloat(d.today_pnl);
+    const pnlEl = document.getElementById('pnl-display');
+    pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + Math.abs(pnl).toFixed(2) + ' TODAY';
+    pnlEl.className = 'pnl-today ' + (pnl >= 0 ? 'pos' : 'neg');
+
+    // Status badge
+    const badge = document.getElementById('status-badge');
+    badge.textContent = d.active ? '● RUNNING' : '○ PAUSED';
+    badge.className = 'status-badge ' + (d.active ? 'running' : 'stopped');
+
+    // Market bar
+    const dot = document.getElementById('market-dot');
+    dot.className = 'dot' + (d.market_status === 'OPEN' ? '' : ' closed');
+    document.getElementById('market-status-text').textContent = d.market_status;
+    if (d.last_scan) {
+      const t = new Date(d.last_scan);
+      document.getElementById('scan-time-chip').textContent = 'SCAN: ' + t.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+    }
+
+    // Brain chip
+    const b = d.brain;
+    document.getElementById('brain-chip').textContent = `BRAIN: ${b.total_trades} | ${b.win_rate} WR`;
+
+    // Render bot tab if active
+    if (activeTab === 'bot') renderBot(d);
+
+    // Movers news chip refresh
+    updateNewsFilterChips(d.last_gainers || []);
+
+  } catch (_) {}
+};
+
+// ══════════════════════════════════════
+// BOT TAB
+// ══════════════════════════════════════
+const renderBot = (d) => {
+  const b = d.brain;
+  const trades = d.recent_trades || [];
+
+  let html = `
+  <div class="card">
+    <div class="card-title">PORTFOLIO</div>
+    <div class="stat-row">
+      <div class="stat-box">
+        <div class="lbl">EQUITY</div>
+        <div class="val">$${parseFloat(d.equity).toLocaleString('en-US',{minimumFractionDigits:0})}</div>
+      </div>
+      <div class="stat-box">
+        <div class="lbl">TODAY P&L</div>
+        <div class="val ${parseFloat(d.today_pnl)>=0?'green':'red'}">${parseFloat(d.today_pnl)>=0?'+':''}$${Math.abs(parseFloat(d.today_pnl)).toFixed(2)}</div>
+      </div>
+      <div class="stat-box">
+        <div class="lbl">POSITIONS</div>
+        <div class="val">${d.open_positions}</div>
+      </div>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-green" id="btn-start">▶ START</button>
+      <button class="btn btn-red"   id="btn-stop">■ STOP</button>
+      <button class="btn btn-blue"  id="btn-scan">⟳ SCAN</button>
+      <button class="btn btn-red"   id="btn-sellall">✕ SELL ALL</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">BRAIN · SELF-LEARNING</div>
+    <div class="stat-row">
+      <div class="stat-box">
+        <div class="lbl">WIN RATE</div>
+        <div class="val ${b.win_rate !== '0%' ? 'green' : 'yellow'}">${b.win_rate}</div>
+      </div>
+      <div class="stat-box">
+        <div class="lbl">TRADES</div>
+        <div class="val">${b.total_trades}</div>
+      </div>
+      <div class="stat-box">
+        <div class="lbl">TOTAL P&L</div>
+        <div class="val ${parseFloat(b.total_pnl)>=0?'green':'red'}">${parseFloat(b.total_pnl)>=0?'+':''}$${Math.abs(parseFloat(b.total_pnl)).toFixed(0)}</div>
+      </div>
+    </div>
+    ${b.lessons?.length ? `
+    <div class="card-title" style="margin-top:8px">LESSONS LEARNED</div>
+    <ul class="lessons-list">${b.lessons.slice(0,4).map(l => `<li>${escH(l.slice(0,120))}</li>`).join('')}</ul>
+    ` : ''}
+  </div>
+
+  ${trades.length ? `
+  <div class="card">
+    <div class="card-title">RECENT ACTIVITY</div>
+    ${trades.slice(0,12).map(t => `
+    <div class="trade-row">
+      <div>
+        <div class="trade-sym">${escH(t.symbol||'?')}</div>
+        <div class="trade-meta">${escH(t.setup||'')} · ${escH(t.reason?.slice(0,40)||'')}</div>
+      </div>
+      <div style="text-align:right">
+        <div class="tag ${t.type==='BUY'?'tag-green':t.type==='STOP'?'tag-red':'tag-dim'}">${t.type||''}</div>
+        <div class="trade-price" style="margin-top:4px; color:var(--text2)">$${parseFloat(t.price||0).toFixed(3)}</div>
+      </div>
+    </div>`).join('')}
+  </div>` : ''}`;
+
+  const el = document.getElementById('bot-content');
+  el.innerHTML = html;
+  el.classList.add('fade-in');
+
+  // Button events
+  document.getElementById('btn-start')?.addEventListener('click', async () => {
+    await api('/api/autotrader/start', { method: 'POST' });
+    showToast('Auto-trader started ▶');
+    setTimeout(loadStatus, 1000);
+  });
+  document.getElementById('btn-stop')?.addEventListener('click', async () => {
+    await api('/api/autotrader/stop', { method: 'POST' });
+    showToast('Auto-trader stopped ■');
+    setTimeout(loadStatus, 1000);
+  });
+  document.getElementById('btn-scan')?.addEventListener('click', async () => {
+    showToast('Scanning...');
+    await api('/api/autotrader/scan', { method: 'POST' });
+    setTimeout(loadStatus, 3000);
+  });
+  document.getElementById('btn-sellall')?.addEventListener('click', async () => {
+    if (!confirm('Sell ALL positions?')) return;
+    const r = await api('/api/autotrader/sellall', { method: 'POST' });
+    showToast(r.message || 'Sold all');
+    setTimeout(loadStatus, 2000);
+  });
+};
+
+// ══════════════════════════════════════
+// HOLDINGS TAB
+// ══════════════════════════════════════
+const loadHoldings = async () => {
+  document.getElementById('holdings-content').innerHTML = '<div class="loading">LOADING HOLDINGS</div>';
   try {
-    const d = await fetch(`/api/edgar?ticker=${ticker}`).then(r=>r.json());
-    el.textContent = d.data || "No data.";
-  } catch(e) { el.textContent = "Failed."; }
-}
+    const d = await api('/api/holdings');
+    const holdings = d.holdings || [];
 
-// ── Earnings ───────────────────────────────────────────────────────────────
-async function loadEarnings() {
-  const el = document.getElementById("earnings-out");
-  el.innerHTML = `<span class="loading-txt">⚡ Loading earnings calendar...</span>`;
+    if (!holdings.length) {
+      document.getElementById('holdings-content').innerHTML = '<div class="empty">NO OPEN POSITIONS</div>';
+      return;
+    }
+
+    let html = `
+    <div class="card">
+      <div class="stat-row">
+        <div class="stat-box">
+          <div class="lbl">PORT VALUE</div>
+          <div class="val">$${parseFloat(d.total_value).toFixed(2)}</div>
+        </div>
+        <div class="stat-box">
+          <div class="lbl">UNREALIZED</div>
+          <div class="val ${parseFloat(d.total_pnl)>=0?'green':'red'}">${parseFloat(d.total_pnl)>=0?'+':''}$${parseFloat(d.total_pnl).toFixed(2)}</div>
+        </div>
+        <div class="stat-box">
+          <div class="lbl">TODAY</div>
+          <div class="val ${parseFloat(d.total_pnl_today)>=0?'green':'red'}">${parseFloat(d.total_pnl_today)>=0?'+':''}$${parseFloat(d.total_pnl_today).toFixed(2)}</div>
+        </div>
+      </div>
+    </div>`;
+
+    for (const h of holdings) {
+      const pnlPct  = parseFloat(h.unrealized_pnl_pct);
+      const pnlPos  = pnlPct >= 0;
+      const pnlNum  = parseFloat(h.unrealized_pnl);
+      const target  = parseFloat(h.first_target);
+      const stop    = parseFloat(h.hard_stop);
+      const cur     = parseFloat(h.current_price);
+      const entry   = parseFloat(h.avg_entry);
+      const toTarget = ((target - cur) / cur * 100).toFixed(1);
+      const toStop   = ((cur - stop)  / cur * 100).toFixed(1);
+      const progress = Math.min(100, Math.max(0, ((cur - entry) / (target - entry)) * 100));
+
+      html += `
+      <div class="holding-card">
+        <div class="holding-header">
+          <div>
+            <div class="holding-sym">${escH(h.symbol)}</div>
+            <div style="margin-top:4px; display:flex; gap:6px">
+              <span class="tag tag-green">LONG ${h.qty}</span>
+              <span class="tag tag-dim">${escH(h.setup)}</span>
+              ${h.half_sold ? '<span class="tag tag-yellow">½ SOLD</span>' : ''}
+            </div>
+          </div>
+          <div>
+            <div class="holding-pnl ${pnlPos?'':'red'}" style="color:${pnlPos?'var(--green)':'var(--red)'}">${pnlPos?'+':''}$${pnlNum.toFixed(2)}</div>
+            <div style="text-align:right; margin-top:3px; font-family:var(--mono); font-size:12px; color:${pnlPos?'var(--green)':'var(--red)'}">
+              ${pnlPos?'+':''}${pnlPct.toFixed(2)}%
+            </div>
+          </div>
+        </div>
+        <div class="holding-grid">
+          <div class="hg-item"><span class="k">ENTRY </span><span class="v">$${h.avg_entry}</span></div>
+          <div class="hg-item"><span class="k">PRICE </span><span class="v">$${h.current_price}</span></div>
+          <div class="hg-item"><span class="k">TARGET </span><span class="v" style="color:var(--green)">$${h.first_target} <small>(+${toTarget}%)</small></span></div>
+          <div class="hg-item"><span class="k">STOP  </span><span class="v" style="color:var(--red)">$${h.hard_stop} <small>(-${toStop}%)</small></span></div>
+        </div>
+        <div class="progress-bar">
+          <div class="progress-fill" style="width:${progress}%"></div>
+        </div>
+        <div id="of-${h.symbol}" class="of-panel">
+          <div class="of-title">ORDER FLOW · LOADING...</div>
+        </div>
+      </div>`;
+    }
+
+    document.getElementById('holdings-content').innerHTML = html;
+
+    // Load order flow for each holding
+    for (const h of holdings) {
+      loadOrderFlowMini(h.symbol);
+    }
+
+  } catch (e) {
+    document.getElementById('holdings-content').innerHTML = `<div class="empty">Error: ${escH(e.message)}</div>`;
+  }
+};
+
+const loadOrderFlowMini = async (symbol) => {
   try {
-    const d = await fetch("/api/earnings").then(r=>r.json());
-    el.textContent = d.ai_summary || "No data.";
-  } catch(e) { el.textContent = "Failed."; }
-}
+    const d = await api(`/api/orderflow/${symbol}`);
+    const of = d.orderFlow;
+    if (!of) return;
+    const fp = of.footprint, lm = of.liqMap, vp = of.volProfile;
+    const buyPct  = fp ? parseFloat(fp.buyPct) : 50;
+    const barColor = buyPct >= 60 ? 'var(--green)' : buyPct >= 50 ? 'var(--yellow)' : 'var(--red)';
 
-// ── Chat ───────────────────────────────────────────────────────────────────
-function appendMsg(role, text) {
-  const div = document.createElement("div");
-  div.className = `msg ${role}`;
-  if (role==="bot") {
-    div.innerHTML = `<div class="sender">PULSETRADER</div>${text}<div class="ts">${ts()}</div>`;
+    const html = `
+    <div class="of-title">ORDER FLOW · ${escH(of.entryGrade || '—')}</div>
+    ${fp ? `
+    <div class="of-row">
+      <span class="of-label">FOOTPRINT</span>
+      <span class="of-val" style="color:${buyPct>=52?'var(--green)':buyPct>=48?'var(--yellow)':'var(--red)'}">${fp.buyPct}% BUY · ${fp.imbalance}</span>
+    </div>
+    <div class="buy-bar-wrap">
+      <div class="buy-bar-fill" style="width:${buyPct}%;background:${barColor}"></div>
+    </div>` : ''}
+    ${lm ? `
+    <div class="of-row" style="margin-top:8px">
+      <span class="of-label">LIQ MAP</span>
+      <span class="of-val" style="font-size:10px">${escH(lm.signal.replace(/[🟢🔴⚪🟡]/g,'').trim())}</span>
+    </div>` : ''}
+    ${vp ? `
+    <div class="of-row">
+      <span class="of-label">VPOC</span>
+      <span class="of-val" style="color:var(--cyan)">$${vp.vpoc} · ${escH(vp.signal.replace(/[🟢🔴⚪⚠️]/g,'').trim())}</span>
+    </div>` : ''}`;
+
+    const el = document.getElementById(`of-${symbol}`);
+    if (el) el.innerHTML = html;
+  } catch (_) {}
+};
+
+// ══════════════════════════════════════
+// MOVERS TAB
+// ══════════════════════════════════════
+const loadMovers = async () => {
+  moversLoaded = true;
+  document.getElementById('movers-content').innerHTML = '<div class="loading">SCANNING MARKET</div>';
+  try {
+    const d = await api('/api/movers');
+    renderMovers(d);
+  } catch (e) {
+    document.getElementById('movers-content').innerHTML = `<div class="empty">Error: ${escH(e.message)}</div>`;
+  }
+};
+
+document.getElementById('movers-refresh-btn').addEventListener('click', () => {
+  moversLoaded = false;
+  loadMovers();
+});
+
+const renderMovers = (d) => {
+  const gainers  = d.gainers  || [];
+  const analysis = d.analysis || '';
+
+  let html = '';
+
+  if (d.scanned) {
+    html += `<div style="font-family:var(--mono);font-size:10px;color:var(--text3);margin-bottom:8px;letter-spacing:1px">SCANNED ${d.scanned} STOCKS · ${new Date(d.ts).toLocaleTimeString()}</div>`;
+  }
+
+  if (analysis && analysis !== 'No real gainers right now. Check back at market open.') {
+    html += `<div class="ai-box fade-in">
+      <div class="ai-label">🤖 AI ANALYSIS · KEV'S STRATEGY</div>
+      <div class="ai-text">${escH(analysis)}</div>
+    </div>`;
+  }
+
+  if (!gainers.length) {
+    html += `<div class="empty">📭 No real gainers right now.<br>Check back at market open.</div>`;
   } else {
-    div.textContent = text;
+    gainers.forEach((g, i) => {
+      const pct = parseFloat(g.change_pct);
+      html += `
+      <div class="mover-row fade-in" style="animation-delay:${i*40}ms" onclick="toggleMoverDetail(this, '${escH(g.symbol)}')">
+        <div class="mover-top">
+          <div>
+            <div class="mover-sym">${escH(g.symbol)}</div>
+            <div class="mover-name">${escH(g.name || g.symbol)}</div>
+          </div>
+          <div class="mover-right">
+            <div class="mover-pct">+${pct.toFixed(2)}%</div>
+            <div class="mover-price">$${g.price}</div>
+          </div>
+        </div>
+        <div class="mover-meta">
+          <span class="tag tag-dim">Vol ${escH(g.volume_fmt || '—')}</span>
+          ${g.float ? `<span class="tag tag-dim">Float ${g.float}M</span>` : ''}
+          ${g.industry ? `<span class="tag tag-blue" style="font-size:9px">${escH(g.industry.slice(0,20))}</span>` : ''}
+        </div>
+        ${g.catalyst ? `<div class="mover-catalyst">📌 ${escH(g.catalyst.slice(0,120))}</div>` : ''}
+        <div class="mover-detail" id="detail-${escH(g.symbol)}">
+          <div class="loading" style="padding:16px 0">LOADING ORDER FLOW</div>
+        </div>
+      </div>`;
+    });
   }
-  document.getElementById("messages").appendChild(div);
-  div.scrollIntoView({behavior:"smooth"});
-  return div;
-}
 
-async function sendMsg() {
-  const input = document.getElementById("chat-input");
-  const btn   = document.getElementById("send-btn");
-  const text  = input.value.trim();
-  if (!text) return;
-  input.value = ""; btn.disabled = true;
-  appendMsg("user", text);
-  chatHistory.push({role:"user",content:text});
-  const loading = appendMsg("bot","⚡ Thinking...");
-  loading.classList.add("loading");
+  const el = document.getElementById('movers-content');
+  el.innerHTML = html;
+};
+
+window.toggleMoverDetail = async (row, symbol) => {
+  const detail = document.getElementById('detail-' + symbol);
+  if (!detail) return;
+  if (detail.classList.contains('open')) {
+    detail.classList.remove('open'); return;
+  }
+  detail.classList.add('open');
+  detail.innerHTML = '<div class="loading" style="padding:12px 0">LOADING ORDER FLOW</div>';
+
   try {
-    const res = await fetch("/api/chat",{
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({messages:chatHistory}),
-    }).then(r=>r.json());
-    loading.remove();
-    const reply = res.reply || res.error || "No response.";
-    appendMsg("bot", reply);
-    chatHistory.push({role:"assistant",content:reply});
-  } catch(e) {
-    loading.remove();
-    appendMsg("bot","Connection error.");
+    const [ofData, newsData] = await Promise.all([
+      api(`/api/orderflow/${symbol}`).catch(() => null),
+      api(`/api/news?ticker=${symbol}`).catch(() => []),
+    ]);
+
+    const of = ofData?.orderFlow;
+    const fp = of?.footprint, lm = of?.liqMap, vp = of?.volProfile;
+    const news = Array.isArray(newsData) ? newsData.slice(0, 5) : [];
+
+    let html = '';
+
+    // Order Flow
+    if (of) {
+      html += `<div class="detail-section">
+        <div class="detail-title">ORDER FLOW · ${escH(of.entryGrade || '—')}</div>
+        <div class="of-grid">`;
+
+      if (fp) {
+        const bp = parseFloat(fp.buyPct);
+        html += `<div class="of-item">
+          <div class="of-label" style="margin-bottom:4px">FOOTPRINT</div>
+          <div class="of-val ${bp>=52?'ok':bp>=45?'neu':'bad'}">${fp.buyPct}% BUY</div>
+          <div style="font-family:var(--mono);font-size:9px;color:var(--text2);margin-top:2px">${fp.imbalance}</div>
+          <div class="buy-bar-wrap" style="margin-top:6px">
+            <div class="buy-bar-fill" style="width:${bp}%;background:${bp>=52?'var(--green)':bp>=45?'var(--yellow)':'var(--red)'}"></div>
+          </div>
+        </div>`;
+      }
+
+      if (lm) {
+        html += `<div class="of-item">
+          <div class="of-label" style="margin-bottom:4px">LIQUIDITY</div>
+          <div class="of-val ${lm.liqRatio>1.1?'ok':lm.liqRatio<0.8?'bad':'neu'}">${lm.liqRatio}x bids</div>
+          <div style="font-family:var(--mono);font-size:9px;color:var(--text2);margin-top:2px">${escH(lm.signal.replace(/[🟢🔴⚪🟡]/g,'').trim().slice(0,30))}</div>
+        </div>`;
+      }
+
+      if (vp) {
+        html += `<div class="of-item">
+          <div class="of-label" style="margin-bottom:4px">VOL PROFILE</div>
+          <div class="of-val ${vp.aboveVPOC?'ok':'bad'}">VPOC $${vp.vpoc}</div>
+          <div style="font-family:var(--mono);font-size:9px;color:var(--text2);margin-top:2px">
+            VAH $${vp.vah} · VAL $${vp.val}
+          </div>
+        </div>`;
+      }
+
+      const score = of.entryScore || 0;
+      html += `<div class="of-item">
+        <div class="of-label" style="margin-bottom:4px">ENTRY SCORE</div>
+        <div class="of-val ${score>=2?'ok':score>=1?'neu':'bad'}">${score}/3</div>
+        <div style="font-family:var(--mono);font-size:9px;color:var(--text2);margin-top:2px">
+          ${score===3?'✅ ALL GREEN':score===2?'⚡ 2/3 OK':score===1?'⚠ WEAK':'❌ AVOID'}
+        </div>
+      </div>`;
+
+      html += `</div></div>`;
+    }
+
+    // News
+    if (news.length) {
+      html += `<div class="detail-section">
+        <div class="detail-title">LATEST NEWS</div>
+        ${news.map(n => `
+        <div class="news-item">
+          <div class="news-hl">${escH(n.headline)}</div>
+          <div class="news-src">${escH(n.source || '—')} · ${n.datetime ? new Date(n.datetime*1000).toLocaleDateString() : ''}</div>
+        </div>`).join('')}
+      </div>`;
+    } else {
+      html += `<div style="font-family:var(--mono);font-size:10px;color:var(--text3);padding:8px 0">No recent news</div>`;
+    }
+
+    detail.innerHTML = html;
+  } catch (e) {
+    detail.innerHTML = `<div class="empty">Error loading data</div>`;
   }
-  btn.disabled = false;
-  input.focus();
-}
+};
 
-function quickSend(text) {
-  document.getElementById("chat-input").value = text;
-  sendMsg();
-  showTab("chat", document.querySelector(".tab"));
-}
+// ══════════════════════════════════════
+// NEWS TAB
+// ══════════════════════════════════════
+let currentNewsTicker = '';
 
-// ── Init ───────────────────────────────────────────────────────────────────
-loadAccount();
-loadBotStatus();
-setInterval(loadAccount,   30000);
-setInterval(loadBotStatus, 15000);
+const loadNews = async (ticker) => {
+  newsLoaded = true;
+  currentNewsTicker = ticker;
+  document.getElementById('news-content').innerHTML = '<div class="loading">FETCHING NEWS</div>';
+  try {
+    const url = ticker ? `/api/news?ticker=${ticker}` : '/api/news';
+    const news = await api(url);
+    renderNews(Array.isArray(news) ? news : []);
+  } catch (e) {
+    document.getElementById('news-content').innerHTML = `<div class="empty">Error: ${escH(e.message)}</div>`;
+  }
+};
+
+const renderNews = (news) => {
+  if (!news.length) {
+    document.getElementById('news-content').innerHTML = '<div class="empty">NO NEWS FOUND</div>';
+    return;
+  }
+  const html = news.map((n, i) => `
+  <div class="news-card fade-in" style="animation-delay:${i*30}ms">
+    <div class="news-card-headline">${escH(n.headline)}</div>
+    <div class="news-card-footer">
+      <span class="news-card-source">${escH(n.source || '—')}</span>
+      <span class="news-card-time">${n.datetime ? timeSince(n.datetime * 1000) : ''}</span>
+    </div>
+  </div>`).join('');
+  document.getElementById('news-content').innerHTML = html;
+};
+
+const updateNewsFilterChips = (gainers) => {
+  const filter = document.getElementById('news-filter');
+  const existing = new Set(Array.from(filter.querySelectorAll('.filter-chip')).map(c => c.dataset.ticker));
+  const top5 = gainers.slice(0, 5);
+  top5.forEach(g => {
+    const sym = g.ticker || g.symbol;
+    if (!sym || existing.has(sym)) return;
+    const chip = document.createElement('div');
+    chip.className = 'filter-chip';
+    chip.dataset.ticker = sym;
+    chip.textContent = sym;
+    chip.addEventListener('click', () => {
+      document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
+      loadNews(sym);
+    });
+    filter.appendChild(chip);
+    existing.add(sym);
+  });
+};
+
+document.querySelectorAll('.filter-chip').forEach(chip => {
+  chip.addEventListener('click', () => {
+    document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+    chip.classList.add('active');
+    loadNews(chip.dataset.ticker || '');
+  });
+});
+
+// ══════════════════════════════════════
+// P&L TAB
+// ══════════════════════════════════════
+const loadPnL = async () => {
+  document.getElementById('pnl-content').innerHTML = '<div class="loading">LOADING P&L</div>';
+  try {
+    const d = await api('/api/pnl');
+    const s = d.summary;
+    const trades = d.recent || [];
+    const pnl = parseFloat(s.total_pnl);
+
+    const html = `
+    <div class="card">
+      <div class="pnl-big ${pnl>=0?'pos':'neg'}">${pnl>=0?'+':''}$${Math.abs(pnl).toFixed(2)}</div>
+      <div style="text-align:center;font-family:var(--mono);font-size:11px;color:var(--text2);margin-bottom:14px">TOTAL P&L</div>
+      <div class="stat-row">
+        <div class="stat-box">
+          <div class="lbl">WIN RATE</div>
+          <div class="val ${parseFloat(s.win_rate)>=50?'green':'red'}">${s.win_rate}</div>
+        </div>
+        <div class="stat-box">
+          <div class="lbl">TRADES</div>
+          <div class="val">${s.total_trades}</div>
+        </div>
+        <div class="stat-box">
+          <div class="lbl">AVG P&L</div>
+          <div class="val ${parseFloat(s.avg_pnl)>=0?'green':'red'}">${parseFloat(s.avg_pnl)>=0?'+':''}$${parseFloat(s.avg_pnl).toFixed(2)}</div>
+        </div>
+      </div>
+      <div class="stat-row">
+        <div class="stat-box"><div class="lbl">WINS</div><div class="val green">${s.winners}</div></div>
+        <div class="stat-box"><div class="lbl">LOSSES</div><div class="val red">${s.losers}</div></div>
+        <div class="stat-box"><div class="lbl">OPEN</div><div class="val">${s.open}</div></div>
+      </div>
+      ${s.best_trade ? `<div style="font-family:var(--mono);font-size:11px;color:var(--text2);margin-top:4px">BEST: <span style="color:var(--green)">${s.best_trade.symbol} +$${parseFloat(s.best_trade.pnl).toFixed(2)}</span></div>` : ''}
+    </div>
+
+    ${trades.filter(t=>t.pnl!=null).length ? `
+    <div class="card">
+      <div class="card-title">TRADE HISTORY</div>
+      ${trades.filter(t=>t.pnl!=null).slice(0,20).map(t => {
+        const p = parseFloat(t.pnl), pp = parseFloat(t.pnl_pct);
+        return `<div class="trade-hist-row">
+          <div>
+            <div class="hist-sym ${p>=0?'':'red'}" style="color:${p>=0?'var(--text)':'var(--red)'}">${escH(t.symbol)}</div>
+            <div class="hist-setup">${escH((t.reason||'').slice(0,40))}</div>
+          </div>
+          <div>
+            <div class="hist-pnl" style="color:${p>=0?'var(--green)':'var(--red)'}">${p>=0?'+':''}$${Math.abs(p).toFixed(2)}</div>
+            <div class="hist-date">${pp>=0?'+':''}${pp.toFixed(1)}%</div>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>` : ''}`;
+
+    document.getElementById('pnl-content').innerHTML = html;
+  } catch (e) {
+    document.getElementById('pnl-content').innerHTML = `<div class="empty">Error: ${escH(e.message)}</div>`;
+  }
+};
+
+// ══════════════════════════════════════
+// UTILS
+// ══════════════════════════════════════
+const escH = (s) => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+const timeSince = (ts) => {
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60)  return s + 's ago';
+  if (s < 3600) return Math.floor(s/60) + 'm ago';
+  if (s < 86400) return Math.floor(s/3600) + 'h ago';
+  return Math.floor(s/86400) + 'd ago';
+};
+
+let toastTimer;
+const showToast = (msg) => {
+  let t = document.getElementById('toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'toast';
+    Object.assign(t.style, {
+      position:'fixed', bottom:'80px', left:'50%', transform:'translateX(-50%)',
+      background:'var(--card)', border:'1px solid var(--green)',
+      color:'var(--green)', fontFamily:'var(--mono)', fontSize:'11px',
+      letterSpacing:'1px', padding:'10px 18px', borderRadius:'8px',
+      zIndex:'9998', boxShadow:'0 0 20px rgba(0,255,136,0.2)',
+      transition:'opacity .3s',
+    });
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.style.opacity = '1';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.style.opacity = '0'; }, 2500);
+};
+
+// ══════════════════════════════════════
+// APP INIT
+// ══════════════════════════════════════
+let pollInterval;
+
+const initApp = () => {
+  loadStatus();
+  pollInterval = setInterval(loadStatus, 15000); // refresh every 15s
+};
+
+// SPY price chip
+const loadSpy = async () => {
+  try {
+    const d = await api('/api/quote?ticker=SPY');
+    const chip = document.getElementById('spy-chip');
+    if (d.price) {
+      chip.textContent = `SPY $${parseFloat(d.price).toFixed(2)} ${parseFloat(d.pct)>=0?'+':''}${parseFloat(d.pct).toFixed(2)}%`;
+    }
+  } catch (_) {}
+};
+
+// Load SPY every 30s when app is visible
+setInterval(() => {
+  if (AUTH_TOKEN && document.getElementById('app').classList.contains('visible')) {
+    loadSpy();
+  }
+}, 30000);
 </script>
 </body>
 </html>
