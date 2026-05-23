@@ -16,7 +16,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.static("public"));
 
 // ── AUTH ──────────────────────────────────────────────────────────────────
-const PASSCODE   = process.env.PASSCODE || "092783";
+const PASSCODE   = process.env.ACCESS_CODE || process.env.PASSCODE || "092783";
 const makeToken  = () => crypto.createHmac("sha256", PASSCODE).update("pt_auth").digest("hex");
 
 const parseCookies = req => {
@@ -1024,7 +1024,7 @@ app.get("/health",(_, res)=>res.json({status:"ok",version:"12.0.0",strategy:"Jee
 const PORT=process.env.PORT||3001;
 app.listen(PORT, async()=>{
   console.log(`⚡ PulseTrader v12.0 on port ${PORT}`);
-  console.log(`   Security : Cookie login at /login | Passcode: ${PASSCODE}`);
+  console.log(`   Security : Cookie login at /login | ACCESS_CODE set: ${!!process.env.ACCESS_CODE}`);
   console.log(`   Strategy : Jeezy Strategy — 6 Setups`);
   console.log(`   Entry    : S/D Flip | AH Gapper | Dip&Rip | VWAP | 200MA | Two-Way`);
   console.log(`   OrderFlow: Footprint buy% + Liquidity Heat Map`);
