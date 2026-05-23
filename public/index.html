@@ -335,7 +335,7 @@ const logout = () => {
   appEl.classList.remove('visible');
 };
 
-const doLogin = async () => {
+window.doLogin = async function() {
   const pc = document.getElementById('passcode-input').value.trim();
   if (!pc) return;
   const btn = document.getElementById('login-btn');
