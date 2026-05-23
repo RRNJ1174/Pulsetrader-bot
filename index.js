@@ -865,7 +865,14 @@ app.post("/api/chat", async(req,res)=>{
       }catch(_){}
     }
     const[spy,account]=await Promise.all([finnhub("/quote?symbol=SPY").catch(()=>null),alpaca("/v2/account").catch(()=>null)]);
-    const ctx=[spy?.c?`[SPY $${spy.c} ${spy.dp>=0?"+":""}${spy.dp?.toFixed(2)}%]`:"",account?`[Equity:$${parseFloat(account.equity).toFixed(0)}|Cash:$${parseFloat(account.cash).toFixed(0)}]`:"",autoTraderActive?"[Bot:RUNNING]":"[Bot:PAUSED]",BRAIN.totalTrades>0?`[Brain:${BRAIN.totalTrades}T|${((BRAIN.wins/BRAIN.totalTrades)*100).toFixed(0)}%WR]`:""].filter(Boolean).join(" ");
+    const ctx=[
+      spy?.c?`[SPY $${spy.c} ${spy.dp>=0?"+":""}${spy.dp?.toFixed(2)}%]`:"",
+      account?`[Equity:$${parseFloat(account.equity).toFixed(0)}|Cash:$${parseFloat(account.cash).toFixed(0)}]`:"",
+      autoTraderActive?"[Bot:RUNNING]":"[Bot:PAUSED]",
+      BRAIN.totalTrades>0?`[Brain:${BRAIN.totalTrades}T|${((BRAIN.wins/BRAIN.totalTrades)*100).toFixed(0)}%WR]`:"",
+      lastGainers.length?`[TopMovers:${lastGainers.slice(0,3).map(g=>`${g.ticker}+${(g.dp||0).toFixed(0)}%`).join(",")}]`:"",
+      "[NOTE: You can answer general trading questions, market news questions, and strategy questions. Not every question needs stock data.]"
+    ].filter(Boolean).join(" ");
     const last=messages[messages.length-1];
     res.json({reply:await groqChat([...messages.slice(0,-1),{...last,content:last.content+"\n"+ctx}])});
   }catch(e){res.status(500).json({error:e.message});}
