@@ -13,6 +13,11 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+// Protect root — redirect to login if no valid session
+app.get("/", (req, res, next) => {
+  if (!isAuthed(req)) return res.redirect("/login");
+  next();
+});
 app.use(express.static("public"));
 
 // ── AUTH ──────────────────────────────────────────────────────────────────
