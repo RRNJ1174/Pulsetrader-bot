@@ -237,10 +237,10 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);font-size:14
   </div>
   <!-- BOTTOM NAV -->
   <nav class="bnav">
-    <div class="ntab active" data-tab="bot"><span class="ico">🤖</span>Bot</div>
-    <div class="ntab" data-tab="holdings"><span class="ico">📊</span>Holdings</div>
-    <div class="ntab" data-tab="pnl"><span class="ico">💰</span>P&amp;L</div>
-    <div class="ntab" data-tab="movers"><span class="ico">🔥</span>Movers</div>
+    <div class="ntab active" id="ntab-bot" onclick="switchTab('bot')"><span class="ico">🤖</span>Bot</div>
+    <div class="ntab" id="ntab-holdings" onclick="switchTab('holdings')"><span class="ico">📊</span>Holdings</div>
+    <div class="ntab" id="ntab-pnl" onclick="switchTab('pnl')"><span class="ico">💰</span>P&amp;L</div>
+    <div class="ntab" id="ntab-movers" onclick="switchTab('movers')"><span class="ico">🔥</span>Movers</div>
   </nav>
 </div>
 <div id="toast"></div>
@@ -265,19 +265,18 @@ const toast = msg => {
 
 // ── NAV TABS ──
 let activeTab = 'bot';
-document.querySelectorAll('.ntab').forEach(t => {
-  t.addEventListener('click', () => {
-    const tab = t.dataset.tab;
-    document.querySelectorAll('.ntab').forEach(x => x.classList.remove('active'));
-    document.querySelectorAll('.tab-panel').forEach(x => x.classList.remove('active'));
-    t.classList.add('active');
-    document.getElementById('tab-' + tab).classList.add('active');
-    activeTab = tab;
-    if (tab === 'holdings') loadHoldings();
-    if (tab === 'pnl') loadPnL();
-    if (tab === 'movers' && !moversInit) { moversInit = true; loadMovers(); }
-  });
-});
+window.switchTab = function(tab) {
+  document.querySelectorAll('.ntab').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(x => x.classList.remove('active'));
+  const ntab = document.getElementById('ntab-' + tab);
+  if (ntab) ntab.classList.add('active');
+  const panel = document.getElementById('tab-' + tab);
+  if (panel) panel.classList.add('active');
+  activeTab = tab;
+  if (tab === 'holdings') loadHoldings();
+  if (tab === 'pnl') loadPnL();
+  if (tab === 'movers' && !moversInit) { moversInit = true; loadMovers(); }
+};
 
 // ── STATUS ──
 const loadStatus = async () => {
