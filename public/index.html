@@ -201,20 +201,8 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);font-size:14
 </head>
 <body>
 
-<!-- ═══════════════ LOGIN ═══════════════ -->
-<div id="login-screen">
-  <div class="login-logo">
-    <div class="login-bolt">⚡</div>
-    <div class="login-title">PULSETRADER</div>
-    <div class="login-sub">PAPER TRADING · KEV'S STRATEGY · ORDER FLOW</div>
-  </div>
-  <div class="login-box">
-    <label class="login-label">ENTER PASSCODE</label>
-    <input type="password" id="passcode-input" maxlength="20" placeholder="••••••••" autocomplete="off">
-    <button class="login-btn" id="login-btn" onclick="doLogin()">AUTHENTICATE</button>
-    <div class="login-err" id="login-err"></div>
-  </div>
-</div>
+<!-- Login handled by /login route -->
+<div id="login-screen" class="hidden"></div>
 
 <!-- ═══════════════ APP ═══════════════ -->
 <div id="app">
@@ -319,57 +307,24 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);font-size:14
 // ══════════════════════════════════════════════
 // AUTH
 // ══════════════════════════════════════════════
-let TOKEN = sessionStorage.getItem('pt_tok') || '';
+let TOKEN = 'open';
 const loginScreen = document.getElementById('login-screen');
 const appEl       = document.getElementById('app');
 
 const api = async (path, opts={}) => {
-  const r = await fetch(path, {...opts, headers:{'Content-Type':'application/json','x-auth-token':TOKEN,...(opts.headers||{})}});
-  if (r.status===401){logout();throw new Error('Unauthorized');}
+  const r = await fetch(path, {...opts, headers:{'Content-Type':'application/json',...(opts.headers||{})}});
+  if (r.status===401) { window.location.href='/login'; throw new Error('Unauthorized'); }
   return r.json();
 };
 
-const logout = () => {
-  sessionStorage.removeItem('pt_tok'); TOKEN='';
-  loginScreen.classList.remove('hidden');
-  appEl.classList.remove('visible');
-};
+const logout = () => {};
 
-window.doLogin = async function() {
-  const pc = document.getElementById('passcode-input').value.trim();
-  if (!pc) return;
-  const btn = document.getElementById('login-btn');
-  btn.textContent='AUTHENTICATING...'; btn.disabled=true;
-  try {
-    const r = await fetch('/api/auth',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({passcode:pc})});
-    const d = await r.json();
-    if (!r.ok||!d.token){
-      document.getElementById('login-err').textContent = d.error||'WRONG PASSCODE';
-      document.getElementById('passcode-input').classList.add('err');
-      setTimeout(()=>document.getElementById('passcode-input').classList.remove('err'),500);
-      btn.textContent='AUTHENTICATE'; btn.disabled=false;
-      document.getElementById('passcode-input').value='';
-      return;
-    }
-    TOKEN=d.token; sessionStorage.setItem('pt_tok',TOKEN);
-    loginScreen.classList.add('hidden'); appEl.classList.add('visible');
-    initApp();
-  } catch(e){
-    document.getElementById('login-err').textContent='CONNECTION ERROR';
-    btn.textContent='AUTHENTICATE'; btn.disabled=false;
-  }
-};
+// Auth handled server-side
 
-document.getElementById('login-btn').addEventListener('click',doLogin);
-document.getElementById('passcode-input').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();});
-
-// Check existing token
-(async()=>{
-  if(!TOKEN) return;
-  try{const r=await fetch('/api/ping',{headers:{'x-auth-token':TOKEN}});if(r.status===401){TOKEN='';sessionStorage.removeItem('pt_tok');return;}
-    loginScreen.classList.add('hidden');appEl.classList.add('visible');initApp();
-  }catch(_){}
-})();
+// Auto-start - no login required
+loginScreen.classList.add('hidden');
+appEl.classList.add('visible');
+document.addEventListener('DOMContentLoaded', () => initApp());
 
 // ══════════════════════════════════════════════
 // NAV TABS
