@@ -27,7 +27,9 @@ const requireAuth = (req, res, next) => {
 };
 app.post("/api/auth", (req, res) => {
   const { passcode } = req.body;
-  if (passcode !== (process.env.PASSCODE || process.env.ACCESS_PIN || "pulse2024")) return res.status(403).json({ error: "Wrong passcode." });
+  const correctPin = process.env.PASSCODE || "092783";
+  console.log(`🔐 Auth attempt: ${passcode===correctPin?"SUCCESS":"FAIL"} (${Object.keys(process.env).filter(k=>k.includes('PASS')||k.includes('ACCESS')).join(',')||'no match vars'})`);
+  if (passcode !== correctPin) return res.status(403).json({ error: "Wrong passcode." });
   const token = createToken(), expires = Date.now() + 24 * 60 * 60 * 1000;
   sessions.set(token, expires);
   for (const [t, exp] of sessions) { if (Date.now() > exp) sessions.delete(t); }
