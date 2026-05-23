@@ -208,21 +208,21 @@ body{background:var(--bg);color:var(--text);font-family:var(--body);font-size:14
     <!-- MOVERS TAB -->
     <div class="tab-panel" id="tab-movers">
       <div class="movers-tabs">
-        <div class="mtab active" data-mtype="gainers">Top Gainers</div>
-        <div class="mtab" data-mtype="active">Most Active</div>
-        <div class="mtab" data-mtype="losers">Top Losers</div>
+        <div class="mtab active" id="mtab-gainers" onclick="setMoverType('gainers')">Top Gainers</div>
+        <div class="mtab" id="mtab-active" onclick="setMoverType('active')">Most Active</div>
+        <div class="mtab" id="mtab-losers" onclick="setMoverType('losers')">Top Losers</div>
       </div>
       <div class="movers-filters">
         <div class="mf-session">
-          <div class="fchip active" data-session="regular">1D</div>
-          <div class="fchip" data-session="pre">Pre</div>
-          <div class="fchip" data-session="ah">AH</div>
+          <div class="fchip active" id="sess-regular" onclick="setSession('regular')">1D</div>
+          <div class="fchip" id="sess-pre" onclick="setSession('pre')">Pre</div>
+          <div class="fchip" id="sess-ah" onclick="setSession('ah')">AH</div>
         </div>
         <div class="mf-period">
-          <div class="fchip active" data-period="1d">1 Day</div>
-          <div class="fchip" data-period="5m">5 Min</div>
-          <div class="fchip" data-period="1m">1 Min</div>
-          <div class="fchip" data-period="5d">5 Days</div>
+          <div class="fchip active" id="per-1d" onclick="setPeriod('1d')">1 Day</div>
+          <div class="fchip" id="per-5m" onclick="setPeriod('5m')">5 Min</div>
+          <div class="fchip" id="per-1m" onclick="setPeriod('1m')">1 Min</div>
+          <div class="fchip" id="per-5d" onclick="setPeriod('5d')">5 Days</div>
         </div>
       </div>
       <div class="movers-header-row">
@@ -473,26 +473,29 @@ const loadPnL = async () => {
 // ── MOVERS ──
 let moversInit=false, currentMoverType='gainers', moversRefreshTimer=null, sparkCache={};
 
-document.querySelectorAll('.mtab').forEach(t => {
-  t.addEventListener('click', () => {
-    document.querySelectorAll('.mtab').forEach(x=>x.classList.remove('active'));
-    t.classList.add('active'); currentMoverType=t.dataset.mtype; loadMovers();
-  });
-});
-document.querySelectorAll('.fchip[data-session]').forEach(c => {
-  c.addEventListener('click', () => {
-    document.querySelectorAll('.fchip[data-session]').forEach(x=>x.classList.remove('active'));
-    c.classList.add('active');
-    const hdr=document.getElementById('pct-col-header');
-    if(c.dataset.session==='pre') hdr.textContent='Pre-mkt %';
-    else if(c.dataset.session==='ah') hdr.textContent='AH %';
-    else hdr.textContent='%Chg 1D ↕';
-    loadMovers();
-  });
-});
-document.querySelectorAll('.fchip[data-period]').forEach(c => {
-  c.addEventListener('click', () => { document.querySelectorAll('.fchip[data-period]').forEach(x=>x.classList.remove('active')); c.classList.add('active'); });
-});
+window.setMoverType = function(type) {
+  document.querySelectorAll('.mtab').forEach(x=>x.classList.remove('active'));
+  const el = document.getElementById('mtab-'+type);
+  if(el) el.classList.add('active');
+  currentMoverType=type; loadMovers();
+};
+
+window.setSession = function(sess) {
+  document.querySelectorAll('.mf-session .fchip').forEach(x=>x.classList.remove('active'));
+  const el = document.getElementById('sess-'+sess);
+  if(el) el.classList.add('active');
+  const hdr=document.getElementById('pct-col-header');
+  if(sess==='pre') hdr.textContent='Pre-mkt %';
+  else if(sess==='ah') hdr.textContent='AH %';
+  else hdr.textContent='%Chg 1D ↕';
+  loadMovers();
+};
+
+window.setPeriod = function(per) {
+  document.querySelectorAll('.mf-period .fchip').forEach(x=>x.classList.remove('active'));
+  const el = document.getElementById('per-'+per);
+  if(el) el.classList.add('active');
+};
 
 const loadMovers = async () => {
   document.getElementById('movers-spinner').style.display='flex';
