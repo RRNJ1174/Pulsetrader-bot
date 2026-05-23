@@ -13,16 +13,17 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static("public"));
 
-// ── AUTH — Server-side cookie sessions ───────────────────────────────────────
-const validSessions = new Set();
+// ── AUTH — Stateless HMAC (survives server restarts) ─────────────────────────
 const PASSCODE = process.env.PASSCODE || "092783";
+// Token = HMAC of "pt_auth" signed with passcode — no memory needed
+const makeToken = () => crypto.createHmac("sha256", PASSCODE).update("pt_auth").digest("hex");
 
 const parseCookies = (req) => {
   const list = {}, header = req.headers.cookie;
   if (!header) return list;
   header.split(";").forEach(c => {
     const [k, ...v] = c.trim().split("=");
-    list[k] = decodeURIComponent(v.join("="));
+    list[k.trim()] = decodeURIComponent(v.join("="));
   });
   return list;
 };
@@ -30,7 +31,7 @@ const parseCookies = (req) => {
 const isAuthed = (req) => {
   const cookies = parseCookies(req);
   const token = req.headers["x-auth-token"] || cookies.pt_session;
-  return validSessions.has(token);
+  return token === makeToken();
 };
 
 const requireAuth = (req, res, next) => {
@@ -82,13 +83,8 @@ app.post("/login", (req, res) => {
   const { passcode } = req.body;
   console.log(`🔐 Login attempt: ${passcode === PASSCODE ? "SUCCESS ✅" : "FAILED ❌"}`);
   if (passcode !== PASSCODE) return res.redirect("/login?error=1");
-  const token = crypto.randomBytes(32).toString("hex");
-  validSessions.add(token);
-  if (validSessions.size > 50) {
-    const first = validSessions.values().next().value;
-    validSessions.delete(first);
-  }
-  res.setHeader("Set-Cookie", `pt_session=${token}; Path=/; HttpOnly; Max-Age=86400`);
+  const token = makeToken(); // stateless — same token every time for this passcode
+  res.setHeader("Set-Cookie", `pt_session=${token}; Path=/; HttpOnly; Max-Age=2592000`); // 30 days
   res.redirect("/");
 });
 
@@ -96,9 +92,9 @@ app.post("/login", (req, res) => {
 app.post("/api/auth", (req, res) => {
   const { passcode } = req.body;
   if (passcode !== PASSCODE) return res.status(403).json({ error: "Wrong passcode." });
-  const token = crypto.randomBytes(32).toString("hex");
-  validSessions.add(token);
-  res.json({ token, expires: Date.now() + 24 * 60 * 60 * 1000 });
+  const token = makeToken();
+  res.setHeader("Set-Cookie", `pt_session=${token}; Path=/; HttpOnly; Max-Age=2592000`);
+  res.json({ token, expires: Date.now() + 30 * 24 * 60 * 60 * 1000 });
 });
 
 app.get("/api/ping", (_, res) => res.json({ ok: true }));
