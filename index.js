@@ -289,8 +289,11 @@ const tzPlaceOrder = async (symbol,action,qty,sess) => {
   const body={
     clientOrderId,
     symbol:symbol.toUpperCase(),
+    securityType:"equity",
+    side:action,
     orderType:"Market",
     traderAction:action,
+    quantity:parseInt(qty),
     orderQuantity:parseInt(qty),
     timeInForce:isExt?"Day_Plus":"Day",
     route:CONFIG.TZ_ROUTE,
@@ -498,9 +501,9 @@ const getOrderFlow = async (ticker,price) => {
 // SCANNER
 // ════════════════════════════════════════════════════════════════════════════
 const SEED_TICKERS = [
-  // Today's movers from TradeZero (updated live)
-  "AMSS","MNTSW","SNGX","NHICW","FGL","MNTS","UZX","LGHL","RDWU","LUNL",
-  "IPWR","NCPL","NNVC","LFVN","PLU","CPSH","SEGG","YMAT","VCIG","QTEX",
+  // Today's movers — updated with live session data
+  "ASTC","AMSS","MNTSW","SNGX","NHICW","FGL","MNTS","UZX","LGHL","RDWU",
+  "LUNL","IPWR","NCPL","NNVC","LFVN","PLU","CPSH","SEGG","YMAT","VCIG","QTEX",
   // Yesterday's movers
   "PRTS","BRAI","CODX","ARTL","OTLK","HTT","AIMD","PHGE","NCRA","QTEXW",
   // Recurring momentum names
