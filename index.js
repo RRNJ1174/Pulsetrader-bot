@@ -519,36 +519,27 @@ const SEED_TICKERS = [
 const getTopGainers = async () => {
   const gainers=[];
   const{sess,isPre}=getSession();
-  // Try Alpaca screener — finds ANY stock, no seed list needed
+  // Primary screener: Alpaca (requires paid plan — may return 0 on free tier)
   try {
     const urls=[
       `/v1beta1/screener/stocks/movers?by=percent_change&top=${CONFIG.TOP_GAINERS_COUNT}&market_type=sip`,
       `/v1beta1/screener/stocks/movers?by=percent_change&top=${CONFIG.TOP_GAINERS_COUNT}`,
-      `/v1beta1/screener/stocks/movers?by=percent_change&top=50`,
-      `/v1beta1/screener/stocks/movers?by=volume&top=${CONFIG.TOP_GAINERS_COUNT}`,
     ];
     for(const url of urls){
       try{
         const data=await alpacaData(url);
-        const list=data.gainers||data.most_actives||[];
-        console.log(`📡 Alpaca endpoint result: ${list.length} stocks`);
+        const list=data.gainers||[];
         if(list.length){
           for(const g of list){
-            const price=g.price||g.close||0;
-            const pct=g.percent_change||g.change_pct||0;
+            const price=g.price||0,pct=g.percent_change||0;
             if(price>=CONFIG.MIN_PRICE&&price<=CONFIG.MAX_PRICE&&pct>=CONFIG.MIN_SPIKE_PCT&&!gainers.find(x=>x.ticker===g.symbol))
               gainers.push({ticker:g.symbol,c:price,dp:pct,v:g.volume||0,source:"alpaca"});
           }
-          if(gainers.length>=5){
-            lastAlpacaTickers=gainers.map(g=>g.ticker);
-            console.log(`📡 Alpaca screener [${sess}]: ${gainers.length} | Top: ${gainers.slice(0,3).map(g=>`${g.ticker}+${g.dp?.toFixed(0)}%`).join(", ")}`);
-            break;
-          }
+          if(gainers.length){lastAlpacaTickers=gainers.map(g=>g.ticker);console.log(`📡 Alpaca screener: ${gainers.length}`);break;}
         }
-      }catch(e){console.log(`Screener error: ${e.message}`);continue;}
+      }catch(_){continue;}
     }
-    if(gainers.length>0){lastAlpacaTickers=gainers.map(g=>g.ticker);}
-  }catch(e){console.log("Screener:",e.message);}
+  }catch(_){}
 
   if(gainers.length<50){  // always run snapshot as backup
     // Build broadest possible universe — Alpaca screener already catches regular hours
@@ -582,11 +573,11 @@ const getTopGainers = async () => {
         const syms=batch.join(",");
         const snapData=await alpacaData(`/v2/stocks/snapshots?symbols=${syms}&feed=iex`);
         for(const[sym,snap] of Object.entries(snapData||{})){
-          const prePrice=snap?.minuteBar?.c||snap?.latestTrade?.p||0;
+          const prePrice=snap?.minuteBar?.c||snap?.dailyBar?.c||snap?.latestTrade?.p||0;
           const prevClose=snap?.prevDailyBar?.c||0;
           if(prePrice>0&&prevClose>0){
             const pct=((prePrice-prevClose)/prevClose)*100;
-            const vol=snap?.minuteBar?.v||0;
+            const vol=snap?.dailyBar?.v||snap?.minuteBar?.v||0; // use full day volume
             if(pct>=CONFIG.MIN_SPIKE_PCT&&prePrice>=CONFIG.MIN_PRICE&&vol>=minVol&&!gainers.find(g=>g.ticker===sym)){
               if(isPre&&pct>CONFIG.HALT_RISK_PCT){
                 console.log(`⚠️ ${sym} +${pct.toFixed(0)}% — halt risk flagged`);
