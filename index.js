@@ -519,7 +519,7 @@ const SEED_TICKERS = [
 const getTopGainers = async () => {
   const gainers=[];
   const{sess,isPre}=getSession();
-  // Try Alpaca screener multiple ways — finds ANY moving stock, no seed list needed
+  // Try Alpaca screener — finds ANY stock, no seed list needed
   try {
     const urls=[
       `/v1beta1/screener/stocks/movers?by=percent_change&top=${CONFIG.TOP_GAINERS_COUNT}&market_type=sip`,
@@ -531,6 +531,7 @@ const getTopGainers = async () => {
       try{
         const data=await alpacaData(url);
         const list=data.gainers||data.most_actives||[];
+        console.log(`📡 Alpaca endpoint result: ${list.length} stocks`);
         if(list.length){
           for(const g of list){
             const price=g.price||g.close||0;
@@ -538,17 +539,18 @@ const getTopGainers = async () => {
             if(price>=CONFIG.MIN_PRICE&&price<=CONFIG.MAX_PRICE&&pct>=CONFIG.MIN_SPIKE_PCT&&!gainers.find(x=>x.ticker===g.symbol))
               gainers.push({ticker:g.symbol,c:price,dp:pct,v:g.volume||0,source:"alpaca"});
           }
-          if(gainers.length){
+          if(gainers.length>=5){
             lastAlpacaTickers=gainers.map(g=>g.ticker);
-            console.log(`📡 Alpaca screener [${sess}]: ${gainers.length} gainers`);
+            console.log(`📡 Alpaca screener [${sess}]: ${gainers.length} | Top: ${gainers.slice(0,3).map(g=>`${g.ticker}+${g.dp?.toFixed(0)}%`).join(", ")}`);
             break;
           }
         }
-      }catch(_){continue;}
+      }catch(e){console.log(`Screener error: ${e.message}`);continue;}
     }
+    if(gainers.length>0){lastAlpacaTickers=gainers.map(g=>g.ticker);}
   }catch(e){console.log("Screener:",e.message);}
 
-  if(gainers.length<10){
+  if(gainers.length<50){  // always run snapshot as backup
     // Build broadest possible universe — Alpaca screener already catches regular hours
     // For pre-market we need to scan wide: yesterday movers + last scan + seeds + common runners
     const BROAD_UNIVERSE=[
