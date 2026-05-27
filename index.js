@@ -498,44 +498,78 @@ const getOrderFlow = async (ticker,price) => {
 // SCANNER
 // ════════════════════════════════════════════════════════════════════════════
 const SEED_TICKERS = [
-  "PRTS","MNTS","YMAT","VCIG","SNGX","QTEX","QTEXW","CPSH","RDWU","PHGE",
-  "NCRA","BRAI","CODX","UZX","ARTL","OTLK","HTT","AIMD","BKSY","WHLR",
-  "PCLA","EDHL","ATPC","LIMN","ILLR","NCPL","VIDA","DGNX","JUNS","HCWB",
+  // Today's movers from TradeZero (updated live)
+  "AMSS","MNTSW","SNGX","NHICW","FGL","MNTS","UZX","LGHL","RDWU","LUNL",
+  "IPWR","NCPL","NNVC","LFVN","PLU","CPSH","SEGG","YMAT","VCIG","QTEX",
+  // Yesterday's movers
+  "PRTS","BRAI","CODX","ARTL","OTLK","HTT","AIMD","PHGE","NCRA","QTEXW",
+  // Recurring momentum names
+  "PCLA","EDHL","ATPC","LIMN","ILLR","VIDA","DGNX","JUNS","HCWB","WHLR",
   "SLXN","GCL","MLGO","SOUN","MARA","RIOT","CIFR","BTBT","HUT","WULF",
   "CLSK","OCGN","NVAX","ADMA","BNGO","SRNE","TGTX","EDSA","FBRX","HTBX",
   "SAVA","TE","PETZ","BTM","ORBS","AMMO","STFS","ATXI","NKGN","IMVT",
   "CYRX","TRIL","AIIO","AUUD","GMEX","KULR","MULN","STEM","RVNC","QUBT",
   "KPLT","BBCP","CLFD","JSPR","COIN","PLTR","SOFI","HOOD","HIMS","MNMD",
-  "ACMR","GBOX","RDWU","BKSY","BRAI","SNGX","CPSH","AIMD","VCIG","CODX",
+  "ACMR","GBOX","BKSY","BRAI","SNGX","CPSH","AIMD","VCIG","CODX","RDWU",
 ];
 
 const getTopGainers = async () => {
   const gainers=[];
   const{sess,isPre}=getSession();
+  // Try Alpaca screener multiple ways — finds ANY moving stock, no seed list needed
   try {
     const urls=[
       `/v1beta1/screener/stocks/movers?by=percent_change&top=${CONFIG.TOP_GAINERS_COUNT}&market_type=sip`,
       `/v1beta1/screener/stocks/movers?by=percent_change&top=${CONFIG.TOP_GAINERS_COUNT}`,
+      `/v1beta1/screener/stocks/movers?by=percent_change&top=50`,
+      `/v1beta1/screener/stocks/movers?by=volume&top=${CONFIG.TOP_GAINERS_COUNT}`,
     ];
     for(const url of urls){
       try{
         const data=await alpacaData(url);
-        if(data.gainers?.length){
-          for(const g of data.gainers){
-            if(g.price>=CONFIG.MIN_PRICE&&g.price<=CONFIG.MAX_PRICE&&g.percent_change>=CONFIG.MIN_SPIKE_PCT)
-              gainers.push({ticker:g.symbol,c:g.price,dp:g.percent_change,v:g.volume||0,source:"alpaca"});
+        const list=data.gainers||data.most_actives||[];
+        if(list.length){
+          for(const g of list){
+            const price=g.price||g.close||0;
+            const pct=g.percent_change||g.change_pct||0;
+            if(price>=CONFIG.MIN_PRICE&&price<=CONFIG.MAX_PRICE&&pct>=CONFIG.MIN_SPIKE_PCT&&!gainers.find(x=>x.ticker===g.symbol))
+              gainers.push({ticker:g.symbol,c:price,dp:pct,v:g.volume||0,source:"alpaca"});
           }
-          lastAlpacaTickers=gainers.map(g=>g.ticker);
-          console.log(`📡 Alpaca screener [${sess}]: ${gainers.length} gainers`);
-          break;
+          if(gainers.length){
+            lastAlpacaTickers=gainers.map(g=>g.ticker);
+            console.log(`📡 Alpaca screener [${sess}]: ${gainers.length} gainers`);
+            break;
+          }
         }
       }catch(_){continue;}
     }
   }catch(e){console.log("Screener:",e.message);}
 
   if(gainers.length<10){
-    const watchSet=new Set([...yesterdayMovers,...lastAlpacaTickers.slice(0,50),...SEED_TICKERS]);
-    const tickers=[...watchSet].filter(t=>t&&t.length<=5).slice(0,300);
+    // Build broadest possible universe — Alpaca screener already catches regular hours
+    // For pre-market we need to scan wide: yesterday movers + last scan + seeds + common runners
+    const BROAD_UNIVERSE=[
+      // High-frequency small cap runners that appear repeatedly
+      "PRTS","MNTS","YMAT","VCIG","SNGX","QTEX","QTEXW","CPSH","RDWU","PHGE",
+      "NCRA","BRAI","CODX","UZX","ARTL","OTLK","HTT","AIMD","BKSY","WHLR",
+      "AMSS","MNTSW","NHICW","FGL","LGHL","LUNL","IPWR","NCPL","NNVC","LFVN",
+      "PLU","SEGG","PCLA","EDHL","ATPC","LIMN","ILLR","VIDA","DGNX","JUNS",
+      "SLXN","GCL","MLGO","SOUN","MARA","RIOT","CIFR","BTBT","HUT","WULF",
+      "CLSK","OCGN","NVAX","ADMA","BNGO","SRNE","TGTX","EDSA","FBRX","HTBX",
+      "SAVA","TE","PETZ","BTM","ORBS","AMMO","ATXI","NKGN","IMVT","CYRX",
+      "AIIO","AUUD","GMEX","KULR","MULN","QUBT","KPLT","BBCP","COIN","HOOD",
+      "ACMR","GBOX","BKSY","RDWU","HIMS","MNMD","SOFI","PLTR","CLFD","JSPR",
+      "RVNC","STEM","TRIL","HCWB","JDZG","STFS","SNAL","POET","UCAR","LMND",
+      // Biotech/pharma runners
+      "SRNE","OCGN","NVAX","BNGO","SAVA","HTBX","FBRX","EDSA","ADMA","TGTX",
+      "NKGN","IMVT","CYRX","AXSM","ACMR","ALDX","ALRS","ALSA","ALTO","AMAM",
+      // Crypto/tech small caps
+      "MARA","RIOT","CIFR","BTBT","HUT","WULF","CLSK","SOUN","MLGO","KULR",
+      // OTC/penny momentum
+      "VCIG","RDWU","CPSH","LGHL","NNVC","NCPL","IPWR","FGL","SNGX","AMSS",
+    ];
+    const watchSet=new Set([...yesterdayMovers,...lastAlpacaTickers.slice(0,80),...SEED_TICKERS,...BROAD_UNIVERSE]);
+    const tickers=[...watchSet].filter(t=>t&&t.length<=6).slice(0,500);
     const minVol=isPre?CONFIG.PRE_MIN_VOLUME:10000;
     for(let i=0;i<tickers.length;i+=100){
       const batch=tickers.slice(i,i+100);
@@ -782,9 +816,11 @@ const autoTrade = async () => {
       const stock=qualified.find(s=>s.ticker===ticker);
       if(!stock||stock.c<=0) continue;
 
-      // Spread check — tighter for penny stocks
-      const maxSpread=stock.c<1?3:5;
-      if(stock.l2&&parseFloat(stock.l2.spread)>maxSpread){console.log(`🚫 ${ticker} spread wide`);continue;}
+      // Spread check — skip during PRE/AH (spreads always wide before open)
+      if(!isPre&&!isAH){
+        const maxSpread=stock.c<1?5:8;
+        if(stock.l2&&parseFloat(stock.l2.spread)>maxSpread){console.log(`🚫 ${ticker} spread wide`);continue;}
+      }
 
       // Log VWAP/S&D status but don't block — let AI decide
       if(stock.tech&&!stock.tech.aboveVWAP&&!stock.tech.vwapReclaim) console.log(`⚠️ ${ticker} below VWAP — AI will decide`);
