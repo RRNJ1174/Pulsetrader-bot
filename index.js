@@ -795,16 +795,41 @@ const autoTrade = async () => {
     }).join("\n\n");
     lastAnalysis=candStr;
 
-    // Relaxed rules for ALL sessions — momentum + order flow focused
-    const sessionRules=`Session: ${sess} — Trade momentum:\n`+
-      `• Strong % move, buyers in control (buy%>50%), spread clean = valid entry\n`+
-      `• VWAP above = bonus. S/D flip = bonus. MACD bullish = bonus.\n`+
-      `• Being up 50%, 100%, 200%+ is GOOD — trade the momentum and chart\n`+
-      `• Conviction ${CONFIG.MIN_CONVICTION}+ required. Err on side of entering.`;
+    // ── PRE/AH: bypass AI — direct rule-based entry ─────────────────────
+    // AI lacks enough pre-market candles to score accurately
+    // Rule: big % move (+20%+) + min volume = enter directly
+    if(isPre||isAH){
+      for(const stock of qualified){
+        if(owned.includes(stock.ticker)) continue;
+        if(stock.dp<20||stock.v<CONFIG.PRE_MIN_VOLUME) continue;
+        let qty=Math.floor((cash*CONFIG.POSITION_PCT)/stock.c);
+        if(stock.c<1) qty=Math.min(qty,CONFIG.MAX_PENNY_SHARES);
+        if(stock.c<0.1) qty=Math.min(qty,50000);
+        if(qty<1) continue;
+        const setup=stock.tech?.sdFlip?.detected?"sd_flip":stock.tech?.dipRip?.detected?"dip_rip_ema":"ah_gapper";
+        const reason=`${sess} +${stock.dp?.toFixed(1)}% momentum | OF:${stock.of?.grade||"?"}`;
+        console.log(`🚀 BUY ${stock.ticker} x${qty} @ $${stock.c} | ${setup} | PRE/AH direct | ${sess}`);
+        const order=await tzPlaceOrder(stock.ticker,"Buy",qty,sess);
+        if(order.success){
+          openTrades[stock.ticker]={reason,setup,conviction:6,entryPrice:stock.c,qty,halfSold:false,peakPrice:stock.c,volumeReduced:false,time:new Date().toISOString(),hasCatalyst:stock.info?.hasCatalyst,sess};
+          buyPctHistory[stock.ticker]=[];
+          tradeLog.unshift({type:"BUY",symbol:stock.ticker,qty,price:stock.c,conviction:6,reason,setup,target:(stock.c*(1+CONFIG.FIRST_TARGET_PCT/100)).toFixed(4),stop:(stock.c*(1-CONFIG.HARD_STOP_PCT/100)).toFixed(4),sess,ts:new Date().toISOString()});
+          await supabase("pulsetrader_trades",{method:"POST",body:JSON.stringify({symbol:stock.ticker,side:"LONG",qty,entry_price:stock.c,reason:`AUTO[${setup}|c6|${sess}]: ${reason}`})}).catch(()=>{});
+          console.log(`✅ Bought ${stock.ticker} via TradeZero [${sess}]`);
+          owned.push(stock.ticker);
+        } else {
+          console.log(`❌ Order failed ${stock.ticker}: ${order.orderStatus||order.error}`);
+          await logError("order",`${stock.ticker}: ${JSON.stringify(order)}`);
+        }
+      }
+      return;
+    }
 
+    // ── REGULAR hours: full Jeezy AI verdict ─────────────────────────────
+    const sessionRules=`Session: REGULAR — Full Jeezy rules. Conviction ${CONFIG.MIN_CONVICTION}+ required.`;
     const verdict=await groq(
-      `REAL stocks [${sess}] — Jeezy strategy:\n\n${candStr}\n\n${sessionRules}\n\n`+
-      `Pick ALL qualifying stocks.\nReply ONLY:\nBUY: TICKER | CONVICTION: X | SETUP: name | REASON: one line`,300
+      `REAL stocks [REGULAR] — Jeezy strategy:\n\n${candStr}\n\n${sessionRules}\n\n`+
+      `Pick ALL qualifying (conviction ${CONFIG.MIN_CONVICTION}+).\nReply ONLY:\nBUY: TICKER | CONVICTION: X | SETUP: name | REASON: one line`,300
     );
     console.log("🤖",verdict);
 
@@ -815,32 +840,22 @@ const autoTrade = async () => {
       if(conviction<CONFIG.MIN_CONVICTION||owned.includes(ticker)) continue;
       const stock=qualified.find(s=>s.ticker===ticker);
       if(!stock||stock.c<=0) continue;
-
-      // Spread check — skip during PRE/AH (spreads always wide before open)
-      if(!isPre&&!isAH){
-        const maxSpread=stock.c<1?5:8;
-        if(stock.l2&&parseFloat(stock.l2.spread)>maxSpread){console.log(`🚫 ${ticker} spread wide`);continue;}
-      }
-
-      // Log VWAP/S&D status but don't block — let AI decide
-      if(stock.tech&&!stock.tech.aboveVWAP&&!stock.tech.vwapReclaim) console.log(`⚠️ ${ticker} below VWAP — AI will decide`);
-      if(stock.tech?.sdFlip?.prevHigh&&!stock.tech.sdFlip.brokeAbove) console.log(`⚠️ ${ticker} no supply break — AI will decide`);
-
+      const maxSpread=stock.c<1?5:8;
+      if(stock.l2&&parseFloat(stock.l2.spread)>maxSpread){console.log(`🚫 ${ticker} spread wide`);continue;}
       let qty=Math.floor((cash*CONFIG.POSITION_PCT)/stock.c);
       if(stock.c<1) qty=Math.min(qty,CONFIG.MAX_PENNY_SHARES);
       if(stock.c<0.1) qty=Math.min(qty,50000);
       if(qty<1) continue;
-
       const setup=line.match(/SETUP:\s*([a-z_]+)/i)?.[1]||"momentum";
       const reason=line.match(/REASON:\s*(.+)/i)?.[1]||"Jeezy signal";
       const finalConviction=conviction+(stock.info?.convictionBonus||0);
-      console.log(`🚀 BUY ${ticker} x${qty} @ $${stock.c} | ${setup} | c${finalConviction} | ${sess}`);
+      console.log(`🚀 BUY ${ticker} x${qty} @ $${stock.c} | ${setup} | c${finalConviction} | REGULAR`);
       const order=await tzPlaceOrder(ticker,"Buy",qty,sess);
       if(order.success){
         openTrades[ticker]={reason,setup,conviction:finalConviction,entryPrice:stock.c,qty,halfSold:false,peakPrice:stock.c,volumeReduced:false,time:new Date().toISOString(),hasCatalyst:stock.info?.hasCatalyst,sess};
         buyPctHistory[ticker]=[];
         tradeLog.unshift({type:"BUY",symbol:ticker,qty,price:stock.c,conviction:finalConviction,reason,setup,target:(stock.c*(1+CONFIG.FIRST_TARGET_PCT/100)).toFixed(4),stop:(stock.c*(1-CONFIG.HARD_STOP_PCT/100)).toFixed(4),sess,ts:new Date().toISOString()});
-        await supabase("pulsetrader_trades",{method:"POST",body:JSON.stringify({symbol:ticker,side:"LONG",qty,entry_price:stock.c,reason:`AUTO[${setup}|c${finalConviction}|${sess}]: ${reason}`})}).catch(()=>{});
+        await supabase("pulsetrader_trades",{method:"POST",body:JSON.stringify({symbol:ticker,side:"LONG",qty,entry_price:stock.c,reason:`AUTO[${setup}|c${finalConviction}|REGULAR]: ${reason}`})}).catch(()=>{});
         console.log(`✅ Bought ${ticker} via TradeZero`);
       } else {
         console.log(`❌ Order failed ${ticker}: ${order.orderStatus||order.error}`);
