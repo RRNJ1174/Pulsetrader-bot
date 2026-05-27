@@ -199,14 +199,14 @@ Setup names: sd_flip, ah_gapper, two_way, dip_rip_ema, vwap_reclaim, ma200_confl
 
 const groq = async (prompt,maxTokens=1200) => {
   try {
-    const r=await fetch("https://api.groq.com/openai/v1/chat/completions",{method:"POST",headers:{Authorization:`Bearer ${process.env.GROQ_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:"llama-3.3-70b-versatile",max_tokens:maxTokens,messages:[{role:"system",content:buildSystem()},{role:"user",content:prompt}]})});
+    const r=await fetch("https://api.groq.com/openai/v1/chat/completions",{method:"POST",headers:{Authorization:`Bearer ${process.env.GROQ_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:"llama-3.1-8b-instant",max_tokens:maxTokens,messages:[{role:"system",content:buildSystem()},{role:"user",content:prompt}]})});
     const d=await r.json(); if(d.error) throw new Error(d.error.message);
     return d.choices?.[0]?.message?.content||"No response.";
   } catch(e){console.error("Groq:",e.message);return `Error: ${e.message}`;}
 };
 const groqChat = async (messages,maxTokens=1200) => {
   try {
-    const r=await fetch("https://api.groq.com/openai/v1/chat/completions",{method:"POST",headers:{Authorization:`Bearer ${process.env.GROQ_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:"llama-3.3-70b-versatile",max_tokens:maxTokens,messages:[{role:"system",content:buildSystem()},...messages]})});
+    const r=await fetch("https://api.groq.com/openai/v1/chat/completions",{method:"POST",headers:{Authorization:`Bearer ${process.env.GROQ_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:"llama-3.1-8b-instant",max_tokens:maxTokens,messages:[{role:"system",content:buildSystem()},...messages]})});
     const d=await r.json(); if(d.error) throw new Error(d.error.message);
     return d.choices?.[0]?.message?.content||"No response.";
   } catch(e){return `Error: ${e.message}`;}
@@ -612,7 +612,7 @@ const learnFromTrade = async trade => {
     CONFIG.FIRST_TARGET_PCT=BRAIN.adjustedFirstTarget;CONFIG.HARD_STOP_PCT=BRAIN.adjustedStop;CONFIG.MIN_CONVICTION=BRAIN.adjustedConviction;
   }
   try{
-    const lesson=await groq(`Trade: ${trade.symbol} | ${won?"WIN ✅":"LOSS ❌"}\nP&L: $${trade.pnl?.toFixed(2)} | Setup: ${trade.setup} | Exit: ${trade.exitReason}\nONE lesson for Jeezy strategy:`,80);
+    const lesson=await groq(`Trade: ${trade.symbol} | ${won?"WIN ✅":"LOSS ❌"}\nP&L: $${trade.pnl?.toFixed(2)} | Setup: ${trade.setup} | Exit: ${trade.exitReason}\nONE lesson for Jeezy strategy:`,50);
     BRAIN.lessons.unshift(lesson.trim());BRAIN.lessons=BRAIN.lessons.slice(0,10);BRAIN.lastLearned=new Date().toISOString();
   }catch(_){}
   await supabase("bot_trade_memory",{method:"POST",body:JSON.stringify({symbol:trade.symbol,side:"LONG",entry_price:trade.entryPrice,exit_price:trade.exitPrice,pnl:trade.pnl,pnl_pct:trade.pnlPct,entry_reason:trade.reason,exit_reason:trade.exitReason,setup_type:trade.setup,won,entry_hour:new Date().getHours(),day_of_week:new Date().getDay()})}).catch(()=>{});
@@ -761,21 +761,16 @@ const autoTrade = async () => {
     }).join("\n\n");
     lastAnalysis=candStr;
 
-    // Session-aware Groq prompt — relaxed for PRE/AH, strict for REGULAR
-    const sessionRules=isPre||isAH
-      ? `Session: ${sess} — RELAXED rules apply:\n`+
-        `• Focus on momentum: strong % move (+20%+), order flow buy%>50%, spread clean\n`+
-        `• VWAP, S/D flip, MACD not required — limited candles pre/AH\n`+
-        `• If stock is up big with buyers in control = valid entry\n`+
-        `• Being up 50%, 100%, 200%+ is GOOD — trade the momentum\n`+
-        `• Conviction ${CONFIG.MIN_CONVICTION}+ required`
-      : `Session: REGULAR — FULL Jeezy rules:\n`+
-        `• S/D flip confirmed? Above VWAP? EMAs stacked? MACD bullish? OF buy%>52%?\n`+
-        `• Conviction ${CONFIG.MIN_CONVICTION}+ required`;
+    // Relaxed rules for ALL sessions — momentum + order flow focused
+    const sessionRules=`Session: ${sess} — Trade momentum:\n`+
+      `• Strong % move, buyers in control (buy%>50%), spread clean = valid entry\n`+
+      `• VWAP above = bonus. S/D flip = bonus. MACD bullish = bonus.\n`+
+      `• Being up 50%, 100%, 200%+ is GOOD — trade the momentum and chart\n`+
+      `• Conviction ${CONFIG.MIN_CONVICTION}+ required. Err on side of entering.`;
 
     const verdict=await groq(
       `REAL stocks [${sess}] — Jeezy strategy:\n\n${candStr}\n\n${sessionRules}\n\n`+
-      `Pick ALL qualifying stocks.\nReply ONLY:\nBUY: TICKER | CONVICTION: X | SETUP: name | REASON: one line`,600
+      `Pick ALL qualifying stocks.\nReply ONLY:\nBUY: TICKER | CONVICTION: X | SETUP: name | REASON: one line`,300
     );
     console.log("🤖",verdict);
 
@@ -791,11 +786,9 @@ const autoTrade = async () => {
       const maxSpread=stock.c<1?3:5;
       if(stock.l2&&parseFloat(stock.l2.spread)>maxSpread){console.log(`🚫 ${ticker} spread wide`);continue;}
 
-      // VWAP/S&D gates only during regular hours — relax pre/AH
-      if(!isPre&&!isAH){
-        if(stock.tech&&!stock.tech.aboveVWAP&&!stock.tech.vwapReclaim){console.log(`🚫 ${ticker} below VWAP`);continue;}
-        if(stock.tech?.sdFlip?.prevHigh&&!stock.tech.sdFlip.brokeAbove){console.log(`🚫 ${ticker} no supply break`);continue;}
-      }
+      // Log VWAP/S&D status but don't block — let AI decide
+      if(stock.tech&&!stock.tech.aboveVWAP&&!stock.tech.vwapReclaim) console.log(`⚠️ ${ticker} below VWAP — AI will decide`);
+      if(stock.tech?.sdFlip?.prevHigh&&!stock.tech.sdFlip.brokeAbove) console.log(`⚠️ ${ticker} no supply break — AI will decide`);
 
       let qty=Math.floor((cash*CONFIG.POSITION_PCT)/stock.c);
       if(stock.c<1) qty=Math.min(qty,CONFIG.MAX_PENNY_SHARES);
