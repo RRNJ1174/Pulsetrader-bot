@@ -85,7 +85,7 @@ const CONFIG = {
   MIN_POSITION_USD:   100,
   MIN_SPIKE_PCT:      5,
   MIN_VOLUME_RATIO:   10,
-  MIN_CONVICTION:     7,
+  MIN_CONVICTION:     5,   // ← lowered from 7 to 5 so more trades qualify
   MAX_PRICE:          9999,
   MIN_PRICE:          0.01,
   FIRST_TARGET_PCT:   30,
@@ -107,7 +107,7 @@ const CONFIG = {
 const BRAIN = {
   totalTrades:0,wins:0,losses:0,totalPnL:0,
   bestSetups:{},bestTickers:[],recentPerformance:[],
-  adjustedFirstTarget:30,adjustedStop:15,adjustedConviction:7,
+  adjustedFirstTarget:30,adjustedStop:15,adjustedConviction:5,
   lessons:[],lastLearned:null,
 };
 const tradeLog      = [];
@@ -242,8 +242,7 @@ const tzAPI = async (method,path,body=null) => {
   try{return t?JSON.parse(t):{};}catch(_){return {raw:t};}
 };
 
-// ── TZ field mapping confirmed from live API response ─────────────────────
-// accountValue=equity, availableCash=cash, dayPnl=today P&L
+// accountValue=equity, availableCash=cash, dayPnl=today P&L (confirmed from live API)
 const tzGetAccount = async () => {
   try {
     const d=await tzAPI("GET",`/v1/api/accounts/${TZ_ACC()}/pnl`);
@@ -254,16 +253,12 @@ const tzGetAccount = async () => {
       unrealized:parseFloat(d.totalUnrealized||d.dayUnrealized||0),
       raw:d,
     };
-  } catch(e){
-    console.log("TZ account error:",e.message);
-    return {equity:0,cash:0,pnl:0,unrealized:0};
-  }
+  } catch(e){console.log("TZ account error:",e.message);return {equity:0,cash:0,pnl:0,unrealized:0};}
 };
 
 const tzGetPositions = async () => {
   try {
     const d=await tzAPI("GET",`/v1/api/accounts/${TZ_ACC()}/positions`);
-    console.log("TZ positions raw:", JSON.stringify(d).slice(0,300));
     const list=d.positions||d.data||d||[];
     if(!Array.isArray(list)) return [];
     return list.map(p=>{
@@ -320,11 +315,20 @@ const tzSellAll = async () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// SESSION DETECTION
+// SESSION DETECTION — reliable UTC math, no toLocaleString issues on Linux
 // ════════════════════════════════════════════════════════════════════════════
+const getETTime = () => {
+  const now=new Date();
+  // DST: 2nd Sunday March → 1st Sunday November = EDT (UTC-4), else EST (UTC-5)
+  const dstStart=(()=>{const d=new Date(Date.UTC(now.getUTCFullYear(),2,1));d.setUTCDate(8-(d.getUTCDay()||7));return d;})();
+  const dstEnd  =(()=>{const d=new Date(Date.UTC(now.getUTCFullYear(),10,1));d.setUTCDate(1+(7-d.getUTCDay())%7);return d;})();
+  const offset=(now>=dstStart&&now<dstEnd)?-4:-5;
+  return new Date(now.getTime()+offset*3600000);
+};
+
 const getSession = () => {
-  const et=new Date(new Date().toLocaleString("en-US",{timeZone:"America/New_York"}));
-  const d=et.getDay(),t=et.getHours()*100+et.getMinutes();
+  const et=getETTime();
+  const d=et.getUTCDay(),h=et.getUTCHours(),m=et.getUTCMinutes(),t=h*100+m;
   const isWeekend=d===0||d===6;
   const isPre=!isWeekend&&t>=400&&t<930;
   const isOpen=!isWeekend&&t>=930&&t<1600;
@@ -332,8 +336,10 @@ const getSession = () => {
   const isEvening=!isWeekend&&t>=2000&&t<2200;
   const isDead=isWeekend||(t>=2200||t<400);
   const sess=isOpen?"REGULAR":isPre?"PRE":isAH?"AH":isEvening?"EVENING":isWeekend?"WEEKEND":"OVERNIGHT";
+  console.log(`⏰ ET: ${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")} [${sess}]`);
   return {isPre,isOpen,isAH,isEvening,isDead,isWeekend,sess,t};
 };
+
 const canEnter = sess => ["REGULAR","PRE","AH"].includes(sess);
 const getScanInterval = sess => {
   if(sess==="OVERNIGHT") return null;
@@ -409,18 +415,18 @@ const emasStacked = (ema9,ema20,price) => {
 };
 const getFullTechnicals = async (ticker,currentPrice) => {
   try {
-    const now=new Date(),start=new Date(now); start.setHours(4,0,0,0);
+    const now=new Date(),start=new Date(now); start.setUTCHours(start.getUTCHours()-7); // ~4am ET
     const bd=await alpacaData(`/v2/stocks/${ticker}/bars?timeframe=5Min&start=${start.toISOString()}&limit=78&feed=iex`);
-    const bars=bd.bars||[]; if(bars.length<5) return null;
+    const bars=bd.bars||[]; if(bars.length<3) return null;
     const closes=bars.map(b=>b.c);
     const vwap=calcVWAP(bars),ema9=calcEMA(closes,9),ema20=calcEMA(closes,20),ema200=calcEMA(closes,Math.min(200,closes.length));
     const avgVol=calcAvgVol(bars),lastVol=bars[bars.length-1]?.v||0;
     const volRatio=avgVol>0?lastVol/avgVol:0;
     const sdFlip=detectSDFlip(bars,currentPrice),dipRip=detectDipRip(bars,currentPrice);
     const macd=calcMACD(closes),uptrend=isUptrend(bars);
-    const aboveVWAP=currentPrice>=vwap;
+    const aboveVWAP=currentPrice>=vwap&&vwap>0;
     const overDayHigh=currentPrice>=Math.max(...bars.map(b=>b.h));
-    const vwapReclaim=currentPrice>=vwap&&bars.slice(-3).some(b=>b.l<vwap);
+    const vwapReclaim=currentPrice>=vwap&&vwap>0&&bars.slice(-3).some(b=>b.l<vwap);
     const ma200Conf=ema200&&Math.abs(currentPrice-ema200)/ema200<0.05;
     const recentVols=bars.slice(-6).map(b=>b.v||0);
     const volDryUp=recentVols.length>=4&&recentVols.slice(-2).every(v=>v<recentVols.slice(0,-2).reduce((s,x)=>s+x,0)/recentVols.slice(0,-2).length*0.5);
@@ -506,7 +512,6 @@ const SEED_TICKERS = [
 const getTopGainers = async () => {
   const gainers=[];
   const{sess,isPre}=getSession();
-
   try {
     const urls=[
       `/v1beta1/screener/stocks/movers?by=percent_change&top=${CONFIG.TOP_GAINERS_COUNT}&market_type=sip`,
@@ -602,8 +607,8 @@ const learnFromTrade = async trade => {
   const rw=BRAIN.recentPerformance.filter(t=>t.won).length,rt=BRAIN.recentPerformance.length;
   if(rt>=5){
     const rate=rw/rt;
-    if(rate>0.65){BRAIN.adjustedFirstTarget=Math.min(40,BRAIN.adjustedFirstTarget+2);BRAIN.adjustedConviction=Math.max(6,BRAIN.adjustedConviction-1);}
-    else if(rate<0.35){BRAIN.adjustedFirstTarget=Math.max(20,BRAIN.adjustedFirstTarget-2);BRAIN.adjustedStop=Math.max(8,BRAIN.adjustedStop-1);BRAIN.adjustedConviction=Math.min(9,BRAIN.adjustedConviction+1);}
+    if(rate>0.65){BRAIN.adjustedFirstTarget=Math.min(40,BRAIN.adjustedFirstTarget+2);BRAIN.adjustedConviction=Math.max(4,BRAIN.adjustedConviction-1);}
+    else if(rate<0.35){BRAIN.adjustedFirstTarget=Math.max(20,BRAIN.adjustedFirstTarget-2);BRAIN.adjustedStop=Math.max(8,BRAIN.adjustedStop-1);BRAIN.adjustedConviction=Math.min(8,BRAIN.adjustedConviction+1);}
     CONFIG.FIRST_TARGET_PCT=BRAIN.adjustedFirstTarget;CONFIG.HARD_STOP_PCT=BRAIN.adjustedStop;CONFIG.MIN_CONVICTION=BRAIN.adjustedConviction;
   }
   try{
@@ -679,10 +684,7 @@ const managePositions = async (positions,sess) => {
 
     if(!entry.halfSold&&pnlPct>=CONFIG.FIRST_TARGET_PCT){
       const hq=Math.floor(parseFloat(pos.qty)/2);
-      if(hq>=1){
-        const r=await tzPlaceOrder(sym,"Sell",hq,sess);
-        if(r.success){entry.halfSold=true;tradeLog.unshift({type:"PARTIAL_SELL",symbol:sym,qty:hq,price:cur,pnlPct:pnlPct.toFixed(1),reason:`First target +${CONFIG.FIRST_TARGET_PCT}%`,ts:new Date().toISOString()});}
-      }
+      if(hq>=1){const r=await tzPlaceOrder(sym,"Sell",hq,sess);if(r.success){entry.halfSold=true;tradeLog.unshift({type:"PARTIAL_SELL",symbol:sym,qty:hq,price:cur,pnlPct:pnlPct.toFixed(1),reason:`First target +${CONFIG.FIRST_TARGET_PCT}%`,ts:new Date().toISOString()});}}
     }
     if(entry.halfSold&&fromPeak<=-trailPct){
       const r=await tzPlaceOrder(sym,"Sell",pos.qty,sess);
@@ -717,8 +719,11 @@ const managePositions = async (positions,sess) => {
 const autoTrade = async () => {
   lastScanTime=new Date().toISOString();
   const{isPre,isOpen,isAH,sess}=getSession();
-  console.log(`🔍 Scanning [${sess}]...`);
-  if(isOpen){const et=new Date(new Date().toLocaleString("en-US",{timeZone:"America/New_York"}));if(et.getHours()===15&&et.getMinutes()>=55)await saveYesterdayMovers();}
+
+  // Save yesterday's movers at 3:55pm ET
+  const etNow=getETTime();
+  if(isOpen&&etNow.getUTCHours()===19&&etNow.getUTCMinutes()>=55) await saveYesterdayMovers();
+
   try {
     const[positions,account]=await Promise.all([tzGetPositions().catch(()=>[]),tzGetAccount().catch(()=>null)]);
     if((isOpen||isPre||isAH)&&positions.length) await managePositions(positions,sess);
@@ -743,6 +748,7 @@ const autoTrade = async () => {
       return volOk;
     });
     if(!qualified.length){console.log("⏭️ No qualified");return;}
+
     const candStr=qualified.slice(0,6).map(s=>{
       const t=s.tech,l=s.l2,of=s.of;
       return `${s.ticker}: $${s.c} +${s.dp?.toFixed(1)}% | Float:${s.info?.float}M | Session:${sess}\n`+
@@ -754,14 +760,25 @@ const autoTrade = async () => {
         `Spread:${l?.spread||"?"}% | News:${s.info?.hasCatalyst?"✅ "+s.info?.topHeadline?.slice(0,40):"none"}`;
     }).join("\n\n");
     lastAnalysis=candStr;
+
+    // Session-aware Groq prompt — relaxed for PRE/AH, strict for REGULAR
+    const sessionRules=isPre||isAH
+      ? `Session: ${sess} — RELAXED rules apply:\n`+
+        `• Focus on momentum: strong % move (+20%+), order flow buy%>50%, spread clean\n`+
+        `• VWAP, S/D flip, MACD not required — limited candles pre/AH\n`+
+        `• If stock is up big with buyers in control = valid entry\n`+
+        `• Being up 50%, 100%, 200%+ is GOOD — trade the momentum\n`+
+        `• Conviction ${CONFIG.MIN_CONVICTION}+ required`
+      : `Session: REGULAR — FULL Jeezy rules:\n`+
+        `• S/D flip confirmed? Above VWAP? EMAs stacked? MACD bullish? OF buy%>52%?\n`+
+        `• Conviction ${CONFIG.MIN_CONVICTION}+ required`;
+
     const verdict=await groq(
-      `REAL stocks [${sess} session] — Jeezy strategy:\n\n${candStr}\n\n`+
-      `Apply ALL rules:\n1. S/D flip confirmed?\n2. Chart uptrend? Above VWAP? Over daily high? EMAs stacked?\n`+
-      `3. MACD bullish?\n4. Order flow: buy% >52%? Bid wall? Thin ask?\n5. Spread clean?\n`+
-      `NOTE: Pre-market/AH setups valid. Up 40%+ does NOT disqualify if chart confirms.\n\n`+
-      `Pick ALL qualifying (conviction ${CONFIG.MIN_CONVICTION}+).\nReply ONLY:\nBUY: TICKER | CONVICTION: X | SETUP: name | REASON: one line`,600
+      `REAL stocks [${sess}] — Jeezy strategy:\n\n${candStr}\n\n${sessionRules}\n\n`+
+      `Pick ALL qualifying stocks.\nReply ONLY:\nBUY: TICKER | CONVICTION: X | SETUP: name | REASON: one line`,600
     );
     console.log("🤖",verdict);
+
     for(const line of verdict.split("\n").filter(l=>l.startsWith("BUY:"))){
       const m=line.match(/BUY:\s*([A-Z]+)\s*\|\s*CONVICTION:\s*([\d.]+)/i);
       if(!m) continue;
@@ -769,14 +786,22 @@ const autoTrade = async () => {
       if(conviction<CONFIG.MIN_CONVICTION||owned.includes(ticker)) continue;
       const stock=qualified.find(s=>s.ticker===ticker);
       if(!stock||stock.c<=0) continue;
+
+      // Spread check — tighter for penny stocks
       const maxSpread=stock.c<1?3:5;
       if(stock.l2&&parseFloat(stock.l2.spread)>maxSpread){console.log(`🚫 ${ticker} spread wide`);continue;}
-      if(stock.tech&&!stock.tech.aboveVWAP&&!stock.tech.vwapReclaim){console.log(`🚫 ${ticker} below VWAP`);continue;}
-      if(stock.tech?.sdFlip?.prevHigh&&!stock.tech.sdFlip.brokeAbove){console.log(`🚫 ${ticker} no supply break`);continue;}
+
+      // VWAP/S&D gates only during regular hours — relax pre/AH
+      if(!isPre&&!isAH){
+        if(stock.tech&&!stock.tech.aboveVWAP&&!stock.tech.vwapReclaim){console.log(`🚫 ${ticker} below VWAP`);continue;}
+        if(stock.tech?.sdFlip?.prevHigh&&!stock.tech.sdFlip.brokeAbove){console.log(`🚫 ${ticker} no supply break`);continue;}
+      }
+
       let qty=Math.floor((cash*CONFIG.POSITION_PCT)/stock.c);
       if(stock.c<1) qty=Math.min(qty,CONFIG.MAX_PENNY_SHARES);
       if(stock.c<0.1) qty=Math.min(qty,50000);
       if(qty<1) continue;
+
       const setup=line.match(/SETUP:\s*([a-z_]+)/i)?.[1]||"momentum";
       const reason=line.match(/REASON:\s*(.+)/i)?.[1]||"Jeezy signal";
       const finalConviction=conviction+(stock.info?.convictionBonus||0);
@@ -834,7 +859,22 @@ app.post("/api/autotrader/scan", async(_,res)=>{res.json({message:"Scan triggere
 app.get("/api/autotrader/status", async(_,res)=>{
   const[positions,account]=await Promise.all([tzGetPositions().catch(()=>[]),tzGetAccount().catch(()=>null)]);
   const{sess}=getSession();
-  res.json({active:autoTraderActive,last_scan:lastScanTime,session:sess,broker:"TradeZero",open_positions:positions.length,equity:account?account.equity.toFixed(2):"—",cash:account?account.cash.toFixed(2):"—",today_pnl:account?(account.pnl||0).toFixed(2):"—",config:{position_pct:(CONFIG.POSITION_PCT*100)+"%",first_target:CONFIG.FIRST_TARGET_PCT+"%",trail_stop:CONFIG.TRAIL_STOP_PCT+"%",hard_stop:CONFIG.HARD_STOP_PCT+"%",min_conviction:CONFIG.MIN_CONVICTION,sessions:"PRE+REGULAR+AH"},recent_trades:tradeLog.slice(0,20),last_gainers:lastGainers,last_analysis:lastAnalysis,brain:{total_trades:BRAIN.totalTrades,wins:BRAIN.wins,losses:BRAIN.losses,win_rate:BRAIN.totalTrades>0?((BRAIN.wins/BRAIN.totalTrades)*100).toFixed(1)+"%":"0%",total_pnl:BRAIN.totalPnL.toFixed(2),best_setups:BRAIN.bestSetups,best_tickers:BRAIN.bestTickers,lessons:BRAIN.lessons,adjusted_target:BRAIN.adjustedFirstTarget+"%",adjusted_stop:BRAIN.adjustedStop+"%"},yesterday_movers:yesterdayMovers});
+  const todayPnL=account?(account.pnl||0):0;
+  const equity=account?account.equity:0;
+  res.json({
+    active:autoTraderActive,last_scan:lastScanTime,session:sess,broker:"TradeZero",
+    open_positions:positions.length,max_positions:10,
+    equity:account?account.equity.toFixed(2):"—",
+    cash:account?account.cash.toFixed(2):"—",
+    today_pnl:todayPnL.toFixed(2),
+    today_pnl_pct:equity>0?((todayPnL/equity)*100).toFixed(2)+"%":"0.00%",
+    profit_target:CONFIG.FIRST_TARGET_PCT+"%",
+    stop_loss:CONFIG.HARD_STOP_PCT+"%",
+    config:{position_pct:(CONFIG.POSITION_PCT*100)+"%",first_target:CONFIG.FIRST_TARGET_PCT+"%",trail_stop:CONFIG.TRAIL_STOP_PCT+"%",hard_stop:CONFIG.HARD_STOP_PCT+"%",min_conviction:CONFIG.MIN_CONVICTION,sessions:"PRE+REGULAR+AH"},
+    recent_trades:tradeLog.slice(0,20),last_gainers:lastGainers,last_analysis:lastAnalysis,
+    brain:{total_trades:BRAIN.totalTrades,wins:BRAIN.wins,losses:BRAIN.losses,win_rate:BRAIN.totalTrades>0?((BRAIN.wins/BRAIN.totalTrades)*100).toFixed(1)+"%":"0%",total_pnl:BRAIN.totalPnL.toFixed(2),best_setups:BRAIN.bestSetups,best_tickers:BRAIN.bestTickers,lessons:BRAIN.lessons,adjusted_target:BRAIN.adjustedFirstTarget+"%",adjusted_stop:BRAIN.adjustedStop+"%"},
+    yesterday_movers:yesterdayMovers
+  });
 });
 
 app.post("/api/autotrader/sellall",async(_,res)=>{try{const n=await tzSellAll();res.json({message:`Sold ${n} positions via TradeZero`});}catch(e){res.status(500).json({error:e.message});}});
@@ -846,7 +886,7 @@ app.post("/api/chat", async(req,res)=>{
     const userMsg=messages[messages.length-1]?.content?.toLowerCase()||"";
     if(userMsg.match(/\b(movers?|gainers?|top stocks?|what.?s moving|spikes?)\b/)){
       const top=lastGainers.slice(0,8);
-      if(top.length) return res.json({reply:`🔥 TOP MOVERS [${new Date().toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"})} ET]:\n\n${top.map((g,i)=>`${i+1}. ${g.ticker} +${(g.dp||0).toFixed(1)}% @ $${g.c}`).join("\n")}\n\nLast scan: ${lastScanTime?new Date(lastScanTime).toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit"}):"pending"}`});
+      if(top.length) return res.json({reply:`🔥 TOP MOVERS [${getETTime().toISOString().slice(11,16)} ET]:\n\n${top.map((g,i)=>`${i+1}. ${g.ticker} +${(g.dp||0).toFixed(1)}% @ $${g.c}`).join("\n")}\n\nLast scan: ${lastScanTime?new Date(lastScanTime).toISOString().slice(11,16):"pending"}`});
       autoTrade().catch(()=>{});
       return res.json({reply:`🔍 Scanning now... Bot: ${autoTraderActive?"🟢 RUNNING":"🔴 PAUSED"} | Session: ${getSession().sess}\n\nTry again in 30 seconds.`});
     }
@@ -909,9 +949,9 @@ app.get("/api/sparks", async(req,res)=>{
   try{
     const{tickers=""}=req.query;const list=tickers.split(",").map(t=>t.trim().toUpperCase()).filter(Boolean).slice(0,20);
     if(!list.length) return res.json({});
-    const now=new Date(),start=new Date(now);start.setHours(4,0,0,0);
+    const etStart=new Date(getETTime());etStart.setUTCHours(etStart.getUTCHours()-etStart.getUTCHours()%24);etStart.setUTCHours(8); // ~4am ET in UTC
     const results={};
-    await Promise.all(list.map(async ticker=>{try{const d=await alpacaData(`/v2/stocks/${ticker}/bars?timeframe=1Min&start=${start.toISOString()}&feed=iex&limit=480`);const bars=d.bars||[];if(!bars.length){results[ticker]={closes:[],vols:[],pctFromOpen:0};return;}const open=bars[0].o,current=bars[bars.length-1].c;results[ticker]={closes:bars.map(b=>b.c),vols:bars.map(b=>b.v||0),open,current,pctFromOpen:open>0?parseFloat(((current-open)/open*100).toFixed(2)):0};}catch(_){results[ticker]={closes:[],vols:[],pctFromOpen:0};}}));
+    await Promise.all(list.map(async ticker=>{try{const d=await alpacaData(`/v2/stocks/${ticker}/bars?timeframe=1Min&start=${etStart.toISOString()}&feed=iex&limit=480`);const bars=d.bars||[];if(!bars.length){results[ticker]={closes:[],vols:[],pctFromOpen:0};return;}const open=bars[0].o,current=bars[bars.length-1].c;results[ticker]={closes:bars.map(b=>b.c),vols:bars.map(b=>b.v||0),open,current,pctFromOpen:open>0?parseFloat(((current-open)/open*100).toFixed(2)):0};}catch(_){results[ticker]={closes:[],vols:[],pctFromOpen:0};}}));
     res.json(results);
   }catch(e){res.status(500).json({error:e.message});}
 });
@@ -928,8 +968,11 @@ app.get("/api/holdings",async(_,res)=>{
 });
 
 app.get("/api/account",async(_,res)=>{
-  try{const acc=await tzGetAccount();res.json({equity:acc.equity.toFixed(2),cash:acc.cash.toFixed(2),pnl_today:(acc.pnl||0).toFixed(2),broker:"TradeZero",raw:acc.raw});}
-  catch(e){res.status(500).json({error:e.message});}
+  try{
+    const acc=await tzGetAccount();
+    const pnl=acc.pnl||0,eq=acc.equity||0;
+    res.json({equity:acc.equity.toFixed(2),cash:acc.cash.toFixed(2),pnl_today:pnl.toFixed(2),pnl_today_pct:eq>0?((pnl/eq)*100).toFixed(2)+"%":"0.00%",buying_power:acc.cash.toFixed(2),day_trade_count:0,status:"active",paper:true,broker:"TradeZero"});
+  }catch(e){res.status(500).json({error:e.message});}
 });
 
 app.get("/api/quote",async(req,res)=>{const{ticker="SPY"}=req.query;try{const[q,p]=await Promise.all([finnhub(`/quote?symbol=${ticker.toUpperCase()}`),finnhub(`/stock/profile2?symbol=${ticker.toUpperCase()}`)]);res.json({ticker,price:q.c,change:q.d,pct:q.dp,high:q.h,low:q.l,open:q.o,prev:q.pc,name:p.name,industry:p.finnhubIndustry,market_cap:p.marketCapitalization,float:p.shareOutstanding});}catch(e){res.status(500).json({error:e.message});}});
@@ -948,7 +991,6 @@ app.get("/api/pnl",async(_,res)=>{
 });
 
 app.get("/api/trades",async(_,res)=>{try{res.json(await supabase("pulsetrader_trades?order=created_at.desc&limit=500").then(d=>Array.isArray(d)?d:[]));}catch(e){res.status(500).json({error:e.message});}});
-
 app.post("/api/order",async(req,res)=>{const{symbol,side,qty,sess}=req.body;if(!symbol||!side||!qty)return res.status(400).json({error:"symbol,side,qty required"});try{const action=side.toLowerCase()==="buy"?"Buy":"Sell";const r=await tzPlaceOrder(symbol.toUpperCase(),action,parseInt(qty),sess||getSession().sess);res.json({success:r.success,order:r,broker:"TradeZero"});}catch(e){res.status(500).json({error:e.message});}});
 
 app.post("/api/teach",async(req,res)=>{
@@ -974,16 +1016,12 @@ app.post("/api/trade",async(req,res)=>{const{symbol,side,qty,entry_price,exit_pr
 app.delete("/api/trade/:id",async(req,res)=>{try{await supabase(`pulsetrader_trades?id=eq.${req.params.id}`,{method:"DELETE"});res.json({success:true});}catch(e){res.status(500).json({error:e.message});}});
 
 app.get("/api/news",async(req,res)=>{const{ticker}=req.query;try{const today=new Date().toISOString().split("T")[0],week=new Date(Date.now()-7*86400000).toISOString().split("T")[0];const news=ticker?await finnhub(`/company-news?symbol=${ticker.toUpperCase()}&from=${week}&to=${today}`):await finnhub("/news?category=general");res.json((Array.isArray(news)?news:[]).slice(0,20).map(n=>({headline:n.headline,summary:n.summary||null,source:n.source,url:n.url,datetime:n.datetime,ticker:ticker?.toUpperCase()||null})));}catch(e){res.status(500).json({error:e.message});}});
-
 app.get("/api/edgar",async(req,res)=>{const{ticker="SPY"}=req.query;try{const week=new Date(Date.now()-7*86400000).toISOString().split("T")[0],today=new Date().toISOString().split("T")[0];const[p,n,tech,of]=await Promise.all([finnhub(`/stock/profile2?symbol=${ticker.toUpperCase()}`),finnhub(`/company-news?symbol=${ticker.toUpperCase()}&from=${week}&to=${today}`),getFullTechnicals(ticker.toUpperCase(),0),getOrderFlow(ticker.toUpperCase(),0)]);const headlines=Array.isArray(n)?n.slice(0,8).map(x=>`- ${x.headline}`).join("\n"):"No news.";const ai=await groq(`${ticker.toUpperCase()} | Float:${p.shareOutstanding}M\nVWAP:${tech?.aboveVWAP?"above":"below"} | Uptrend:${tech?.uptrend} | SDFlip:${tech?.sdFlip?.detected} | Vol:${tech?.volRatio}x\nOF: ${of?.grade} | Buy%:${of?.footprint?.buyPct}%\nNews:\n${headlines}\n\nJeezy setup? Entry, target, stop, conviction.`);res.json({ticker:ticker.toUpperCase(),data:ai,tech,orderFlow:of,ts:new Date().toISOString()});}catch(e){res.status(500).json({error:e.message});}});
-
 app.get("/api/earnings",async(req,res)=>{try{const today=new Date().toISOString().split("T")[0],next7=new Date(Date.now()+7*86400000).toISOString().split("T")[0];const cal=await finnhub(`/calendar/earnings?from=${today}&to=${next7}`);const top=cal?.earningsCalendar?.slice(0,20)||[];const list=top.map(e=>`${e.symbol}|${e.date}|EPS:${e.epsEstimate??"N/A"}`).join("\n");const ai=await groq(`Earnings:\n${list||"No data"}\n\nJeezy setups? Entry, target, stop.`);res.json({calendar:top,ai_summary:ai,ts:new Date().toISOString()});}catch(e){res.status(500).json({error:e.message});}});
-
 app.get("/api/spikes",async(req,res)=>{try{const gainers=await getTopGainers();if(!gainers.length)return res.json({data:"No candidates.",candidates:[],ts:new Date().toISOString()});const candidates=gainers.slice(0,8);const str=candidates.map(g=>`${g.ticker} +${g.dp?.toFixed(1)}% $${g.c}`).join("\n");const ai=await groq(`Early movers — Jeezy:\n${str}\n\nS/D flip? Order flow bullish? Best 3 to enter NOW?`,800);res.json({data:ai,candidates,ts:new Date().toISOString()});}catch(e){res.status(500).json({error:e.message});}});
 
 app.get("/api/autotrader/brain",(_,res)=>res.json({...BRAIN,watchlist:yesterdayMovers}));
 app.get("/api/autotrader/gainers",(_,res)=>res.json({gainers:lastGainers,analysis:lastAnalysis,ts:lastScanTime}));
-
 app.get("/api/orders",async(req,res)=>{try{const d=await tzAPI("GET",`/v1/api/accounts/${TZ_ACC()}/orders`);const orders=d.orders||d.data||[];res.json(Array.isArray(orders)?orders:[]);}catch(e){res.status(500).json({error:e.message});}});
 
 app.get("/api/dashboard",async(req,res)=>{
@@ -1011,6 +1049,7 @@ app.listen(PORT, async()=>{
   console.log(`   Scanner  : Yesterday movers + Batch snapshots + Dynamic fallback`);
   console.log(`   Exit     : +${CONFIG.FIRST_TARGET_PCT}% half | Trail 9EMA | OF exhaust | Bid wall break`);
   console.log(`   Brain    : Persists via Supabase`);
+  console.log(`   Conviction: ${CONFIG.MIN_CONVICTION}+ (relaxed for more trades)`);
   await loadMemory();
   console.log("🤖 Auto-starting Jeezy Strategy...");
   startAutoTrader();
