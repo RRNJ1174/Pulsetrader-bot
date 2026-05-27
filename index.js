@@ -289,7 +289,7 @@ const tzPlaceOrder = async (symbol,action,qty,sess) => {
   const body={
     clientOrderId,
     symbol:symbol.toUpperCase(),
-    securityType:"equity",
+    securityType:"Stock",
     side:action,
     orderType:"Market",
     traderAction:action,
