@@ -242,39 +242,21 @@ const tzAPI = async (method,path,body=null) => {
   try{return t?JSON.parse(t):{};}catch(_){return {raw:t};}
 };
 
-// ── FIXED: logs exact TZ field names so we can map them correctly ─────────
+// ── TZ field mapping confirmed from live API response ─────────────────────
+// accountValue=equity, availableCash=cash, dayPnl=today P&L
 const tzGetAccount = async () => {
   try {
     const d=await tzAPI("GET",`/v1/api/accounts/${TZ_ACC()}/pnl`);
-    console.log("TZ account raw:", JSON.stringify(d).slice(0,400));
-    const equity=parseFloat(
-      d.netLiquidation||d.equity||d.accountValue||d.totalValue||
-      d.totalNetLiquidation||d.portfolioValue||d.netLiq||
-      d.totalEquity||d.accountEquity||d.balance||0
-    );
-    const cash=parseFloat(
-      d.buyingPower||d.cash||d.cashBalance||d.availableFunds||
-      d.cashAvailable||d.liquidCash||d.excessLiquidity||
-      d.availableCash||d.freeCash||0
-    );
-    const pnl=parseFloat(
-      d.dayPnL||d.dailyPnL||d.realizedDayPnL||d.dayRealizedPnL||
-      d.todayPnL||d.intradayPnL||d.sessionPnL||d.unrealizedPnL||0
-    );
-    return {equity,cash,pnl,raw:d};
+    return {
+      equity:    parseFloat(d.accountValue||d.netLiquidation||d.equity||d.totalValue||0),
+      cash:      parseFloat(d.availableCash||d.cashAvailable||d.cash||d.buyingPower||0),
+      pnl:       parseFloat(d.dayPnl||d.dayPnL||d.dayRealized||0),
+      unrealized:parseFloat(d.totalUnrealized||d.dayUnrealized||0),
+      raw:d,
+    };
   } catch(e){
-    console.log("TZ pnl error:",e.message);
-    // Fallback: try base account endpoint
-    try {
-      const d2=await tzAPI("GET",`/v1/api/accounts/${TZ_ACC()}`);
-      console.log("TZ account fallback raw:", JSON.stringify(d2).slice(0,400));
-      const equity=parseFloat(d2.netLiquidation||d2.equity||d2.accountValue||d2.totalValue||d2.balance||0);
-      const cash=parseFloat(d2.buyingPower||d2.cash||d2.cashBalance||d2.availableFunds||0);
-      return {equity,cash,pnl:0,raw:d2};
-    } catch(e2){
-      console.log("TZ account fallback error:",e2.message);
-      return {equity:0,cash:0,pnl:0};
-    }
+    console.log("TZ account error:",e.message);
+    return {equity:0,cash:0,pnl:0,unrealized:0};
   }
 };
 
