@@ -283,15 +283,20 @@ const tzGetPositions = async () => {
   } catch(e){console.log("TZ positions:",e.message);return [];}
 };
 
-const tzPlaceOrder = async (symbol,action,qty,sess) => {
+const tzPlaceOrder = async (symbol,action,qty,sess,price=null) => {
   const isExt=sess==="PRE"||sess==="AH";
   const clientOrderId=`PT-${Date.now()}-${Math.random().toString(36).slice(2,8).toUpperCase()}`;
+  // TradeZero R135: Day+ (PRE/AH) only allows Limit orders, not Market
+  const orderType=isExt?"Limit":"Market";
+  // For limit: buys use price+2%, sells use price-2%, fallback to passed price
+  const limitPrice=isExt&&price?(action==="Buy"?parseFloat((price*1.02).toFixed(4)):parseFloat((price*0.98).toFixed(4))):undefined;
   const body={
     clientOrderId,
     symbol:symbol.toUpperCase(),
     securityType:"Stock",
     side:action,
-    orderType:"Market",
+    orderType,
+    ...(limitPrice&&{limitPrice,price:limitPrice}),
     traderAction:action,
     quantity:parseInt(qty),
     orderQuantity:parseInt(qty),
@@ -805,7 +810,7 @@ const autoTrade = async () => {
         const setup=stock.tech?.sdFlip?.detected?"sd_flip":stock.tech?.dipRip?.detected?"dip_rip_ema":"ah_gapper";
         const reason=`${sess} +${stock.dp?.toFixed(1)}% momentum | OF:${stock.of?.grade||"?"}`;
         console.log(`🚀 BUY ${stock.ticker} x${qty} @ $${stock.c} | ${setup} | PRE/AH direct | ${sess}`);
-        const order=await tzPlaceOrder(stock.ticker,"Buy",qty,sess);
+        const order=await tzPlaceOrder(stock.ticker,"Buy",qty,sess,stock.c);
         if(order.success){
           openTrades[stock.ticker]={reason,setup,conviction:6,entryPrice:stock.c,qty,halfSold:false,peakPrice:stock.c,volumeReduced:false,time:new Date().toISOString(),hasCatalyst:stock.info?.hasCatalyst,sess};
           buyPctHistory[stock.ticker]=[];
@@ -846,7 +851,7 @@ const autoTrade = async () => {
       const reason=line.match(/REASON:\s*(.+)/i)?.[1]||"Jeezy signal";
       const finalConviction=conviction+(stock.info?.convictionBonus||0);
       console.log(`🚀 BUY ${ticker} x${qty} @ $${stock.c} | ${setup} | c${finalConviction} | REGULAR`);
-      const order=await tzPlaceOrder(ticker,"Buy",qty,sess);
+      const order=await tzPlaceOrder(ticker,"Buy",qty,sess,stock.c);
       if(order.success){
         openTrades[ticker]={reason,setup,conviction:finalConviction,entryPrice:stock.c,qty,halfSold:false,peakPrice:stock.c,volumeReduced:false,time:new Date().toISOString(),hasCatalyst:stock.info?.hasCatalyst,sess};
         buyPctHistory[ticker]=[];
