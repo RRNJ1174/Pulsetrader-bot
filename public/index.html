@@ -302,7 +302,7 @@ async function loadAccount() {
 async function startBot() {
   try {
     const d = await fetch("/api/autotrader/start",{method:"POST"}).then(r=>r.json());
-    appendMsg("bot", "🤖 Auto-trader STARTED! Scanning 100 small caps every 5 min. Target: +25% | Stop: -10%\n\nWill buy HIGH conviction spike setups automatically. Check Bot tab for live trades. 💰");
+    appendMsg("bot", "🤖 Auto-trader STARTED! Scanning every 90s. Target: +30% | Stop: -15%\n\nWill buy HIGH conviction Jeezy setups automatically. Check Bot tab for live trades. 💰");
     updateBotBar(true);
     loadBotStatus();
   } catch(e) { appendMsg("bot","Failed to start bot: "+e.message); }
@@ -342,10 +342,10 @@ async function loadBotStatus() {
 
     document.getElementById("bc-status").textContent  = d.active ? "RUNNING" : "STOPPED";
     document.getElementById("bc-status").style.color  = d.active ? "var(--green)" : "var(--red)";
-    document.getElementById("bc-pos").textContent     = d.open_positions+"/"+d.max_positions;
+    document.getElementById("bc-pos").textContent     = (d.open_positions||0)+"/"+(d.max_positions||10);
     document.getElementById("bc-cash").textContent    = "$"+fmt(d.cash);
-    document.getElementById("cfg-target").textContent = "+"+d.profit_target;
-    document.getElementById("cfg-stop").textContent   = "-"+d.stop_loss;
+    document.getElementById("cfg-target").textContent = d.profit_target||"+30%";
+    document.getElementById("cfg-stop").textContent   = d.stop_loss||"-15%";
 
     const pnlEl = document.getElementById("bc-pnl");
     const pval  = parseFloat(d.today_pnl||0);
@@ -378,11 +378,11 @@ async function loadBotStatus() {
 
 // ── Holdings ───────────────────────────────────────────────────────────────
 async function loadHoldings() {
-  document.getElementById("holdings-body").innerHTML = `<tr><td colspan="9" class="empty-txt">Loading from Alpaca...</td></tr>`;
+  document.getElementById("holdings-body").innerHTML = `<tr><td colspan="9" class="empty-txt">Loading positions...</td></tr>`;
   try {
     const d = await fetch("/api/holdings").then(r=>r.json());
     document.getElementById("h-value").textContent = "$"+fmt(d.total_value);
-    document.getElementById("h-count").textContent = d.count;
+    document.getElementById("h-count").textContent = d.count||0;
     const pe = document.getElementById("h-pnl");
     pe.textContent = (parseFloat(d.total_pnl)>=0?"+$":"-$")+fmt(Math.abs(d.total_pnl));
     pe.style.color = pc(d.total_pnl);
@@ -394,15 +394,15 @@ async function loadHoldings() {
       return;
     }
     document.getElementById("holdings-body").innerHTML = d.holdings.map(h=>`<tr>
-      <td style="font-weight:600">${h.symbol}</td>
-      <td><span class="bdg ${h.side==="long"?"bg":"br"}">${h.side.toUpperCase()}</span></td>
-      <td style="color:var(--muted)">${h.qty}</td>
-      <td style="color:#777">$${h.avg_entry}</td>
-      <td style="font-weight:600">$${h.current_price}</td>
-      <td style="color:#777">$${fmt(h.market_value)}</td>
-      <td style="color:${pc(h.unrealized_pnl)};font-weight:600">${sgn(h.unrealized_pnl)}$${fmt(Math.abs(h.unrealized_pnl))}<br><span style="font-size:10px">${h.unrealized_pnl_pct}</span></td>
-      <td style="color:var(--green);font-size:11px">$${h.target_price}</td>
-      <td style="color:var(--red);font-size:11px">$${h.stop_price}</td>
+      <td style="font-weight:600">${h.symbol||"—"}</td>
+      <td><span class="bdg ${(h.side||"long")==="long"?"bg":"br"}">${(h.side||"long").toUpperCase()}</span></td>
+      <td style="color:var(--muted)">${h.qty||0}</td>
+      <td style="color:#777">$${h.avg_entry||"0.00"}</td>
+      <td style="font-weight:600">$${h.current_price||"0.00"}</td>
+      <td style="color:#777">$${fmt(h.market_value||0)}</td>
+      <td style="color:${pc(h.unrealized_pnl||0)};font-weight:600">${sgn(h.unrealized_pnl||0)}$${fmt(Math.abs(h.unrealized_pnl||0))}<br><span style="font-size:10px">${h.unrealized_pnl_pct||"0.00%"}</span></td>
+      <td style="color:var(--green);font-size:11px">$${h.first_target||"—"}</td>
+      <td style="color:var(--red);font-size:11px">$${h.hard_stop||"—"}</td>
     </tr>`).join("");
   } catch(e) {
     document.getElementById("holdings-body").innerHTML = `<tr><td colspan="9" class="empty-txt">Failed to load</td></tr>`;
@@ -439,11 +439,16 @@ async function loadPnL() {
 // ── Movers ─────────────────────────────────────────────────────────────────
 async function loadMovers() {
   const el = document.getElementById("movers-out");
-  el.innerHTML = `<span class="loading-txt">⚡ Scanning 100 small caps for spikes...</span>`;
+  el.innerHTML = `<span class="loading-txt">⚡ Scanning for movers...</span>`;
   try {
     const d = await fetch("/api/movers").then(r=>r.json());
-    el.textContent = d.data || "No data.";
-    if (d.scanned) el.textContent += `\n\n[Scanned ${d.scanned} tickers]`;
+    if (d.gainers?.length) {
+      el.textContent = d.gainers.slice(0,10).map(g=>`${g.symbol} +${g.change_pct}% @ $${g.price} | Vol: ${g.volume_fmt||g.volume}\n${g.catalyst?"📰 "+g.catalyst:""}`).join("\n\n");
+      if (d.analysis) el.textContent += "\n\n─── AI ANALYSIS ───\n"+d.analysis;
+      if (d.scanned) el.textContent += `\n\n[Scanned ${d.scanned} tickers | Session: ${d.session}]`;
+    } else {
+      el.textContent = d.analysis || "No movers found.";
+    }
   } catch(e) { el.textContent = "Scan failed."; }
 }
 
