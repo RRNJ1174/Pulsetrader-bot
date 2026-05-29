@@ -1,8 +1,11 @@
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  PULSETRADER v13.0 — JEEZY STRATEGY + TRADEZERO EXECUTION             ║
+// ║  PULSETRADER v14.0 — JEEZY STRATEGY + TRADEZERO EXECUTION             ║
 // ║  Pre-Market | Regular | After-Hours | Sleeps 10pm-4am ET              ║
-// ║  Data: Alpaca + Finnhub | Execution: TradeZero API                    ║
-// ║  Catches spikes early — yesterday's movers checked first              ║
+// ║  Scanner: AlphaVantage + Finnhub + Alpaca snapshots (multi-source)    ║
+// ║  AI: Gemini (catalyst+verdict) + Groq (fast scoring)                  ║
+// ║  Risk: 10 max positions | 15% sizing | cash floor | stops survive     ║
+// ║  Learning: weighted hit-rate brain persists across redeploys          ║
+// ║  EOD: 7:55pm ET liquidation (keeps green-momentum overnight holds)    ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
 
 import express from "express";
@@ -81,11 +84,13 @@ app.get("/api/ping",(_,res)=>res.json({ok:true}));
 app.use("/api",requireAuth);
 
 const CONFIG = {
-  POSITION_PCT:       0.20,
+  POSITION_PCT:       0.15,  // 15% per position (was 20%)
+  MAX_POSITIONS:      10,    // HARD cap — refuse new entries at 10
+  CASH_FLOOR_PCT:     0.15,  // never enter if cash < 15% of equity (stops rejected-order spam)
   MIN_POSITION_USD:   100,
   MIN_SPIKE_PCT:      5,
   MIN_VOLUME_RATIO:   10,
-  MIN_CONVICTION:     5,   // ← lowered from 7 to 5 so more trades qualify
+  MIN_CONVICTION:     5,
   MAX_PRICE:          9999,
   MIN_PRICE:          0.01,
   FIRST_TARGET_PCT:   30,
@@ -101,14 +106,28 @@ const CONFIG = {
   MAX_PENNY_SHARES:   10000,
   PRE_MIN_VOLUME:     500,
   HALT_RISK_PCT:      150,
+  EOD_LIQUIDATE_HOUR: 19,    // 7pm ET hour (UTC hour in getETTime frame)
+  EOD_LIQUIDATE_MIN:  55,    // :55 → 7:55pm ET sweep
   TZ_ROUTE:           process.env.TZ_ROUTE || "SMART",
 };
+
+// AlphaVantage rate budget: 25 calls/day free → 2 calls/hour, cache 30 min
+const AV_CACHE = { gainers:[], ts:0, callsToday:0, dayStamp:"" };
+const GEMINI_CACHE = {}; // per-ticker catalyst cache
 
 const BRAIN = {
   totalTrades:0,wins:0,losses:0,totalPnL:0,
   bestSetups:{},bestTickers:[],recentPerformance:[],
   adjustedFirstTarget:30,adjustedStop:15,adjustedConviction:5,
   lessons:[],lastLearned:null,
+  // Weighted hit-rate learning: which feature buckets precede 50-200% runners
+  featureStats:{
+    gap:{},      // gap% bucket → {trades, wins, bigRunners}
+    vol:{},      // volume ratio bucket
+    float:{},    // float size bucket
+    news:{yes:{trades:0,wins:0,big:0},no:{trades:0,wins:0,big:0}},
+    hour:{},     // entry hour bucket
+  },
 };
 const tradeLog      = [];
 const openTrades    = {};
@@ -224,6 +243,47 @@ const finnhub = async path => {
   const r=await fetch(`https://finnhub.io/api/v1${path}${sep}token=${process.env.FINNHUB_KEY}`);
   return r.json();
 };
+
+// ── Gemini (free tier) — catalyst analysis + final verdict ────────────────
+const gemini = async (prompt,maxTokens=800) => {
+  try {
+    if(!process.env.GEMINI_KEY) return null;
+    const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_KEY}`,{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{maxOutputTokens:maxTokens,temperature:0.4}})
+    });
+    const d=await r.json();
+    if(d.error){console.log("Gemini:",d.error.message);return null;}
+    return d.candidates?.[0]?.content?.parts?.[0]?.text||null;
+  } catch(e){console.log("Gemini err:",e.message);return null;}
+};
+
+// ── AlphaVantage TOP_GAINERS_LOSERS — catches MASK/SPRC/CGTL/DLLL ──────────
+// Free tier: 25 calls/day. We cache 30 min and cap at 2 calls/hour.
+const alphaVantageGainers = async () => {
+  const today=new Date().toISOString().split("T")[0];
+  if(AV_CACHE.dayStamp!==today){AV_CACHE.dayStamp=today;AV_CACHE.callsToday=0;}
+  const ageMin=(Date.now()-AV_CACHE.ts)/60000;
+  if(ageMin<30&&AV_CACHE.gainers.length) return AV_CACHE.gainers; // serve cache
+  if(AV_CACHE.callsToday>=24){console.log("⚠️ AlphaVantage daily budget used");return AV_CACHE.gainers;}
+  try {
+    const r=await fetch(`https://www.alphavantage.co/query?function=TOP_GAINERS_LOSERS&apikey=${process.env.ALPHAVANTAGE_KEY}`);
+    const d=await r.json();
+    AV_CACHE.callsToday++;
+    const list=d.top_gainers||[];
+    if(!list.length){console.log("AlphaVantage: no gainers (limit?)");return AV_CACHE.gainers;}
+    const parsed=list.map(g=>({
+      ticker:g.ticker,
+      c:parseFloat(g.price||0),
+      dp:parseFloat((g.change_percentage||"0").replace("%","")),
+      v:parseInt(g.volume||0),
+      source:"alphavantage",
+    })).filter(g=>g.c>=CONFIG.MIN_PRICE&&g.dp>=CONFIG.MIN_SPIKE_PCT);
+    AV_CACHE.gainers=parsed; AV_CACHE.ts=Date.now();
+    console.log(`📡 AlphaVantage: ${parsed.length} gainers (call ${AV_CACHE.callsToday}/24 today)`);
+    return parsed;
+  } catch(e){console.log("AlphaVantage err:",e.message);return AV_CACHE.gainers;}
+};
 const logError = async (ctx,err) => {
   try{await supabase("bot_errors",{method:"POST",body:JSON.stringify({context:ctx,error:String(err?.message||err),ts:new Date().toISOString()})});}catch(_){}
 };
@@ -270,7 +330,7 @@ const tzGetPositions = async () => {
       return {
         symbol:p.symbol||p.ticker,
         qty:String(qty),
-        side:(parseFloat(p.quantity||p.qty||0))>0?"long":"short",
+        side:Math.abs(parseFloat(p.quantity||p.qty||0))>0?"long":"short", // TZ paper returns negative qty for longs
         avg_entry_price:String(entry),
         current_price:String(last),
         market_value:String(qty*last),
@@ -524,7 +584,17 @@ const SEED_TICKERS = [
 const getTopGainers = async () => {
   const gainers=[];
   const{sess,isPre}=getSession();
-  // Primary screener: Alpaca (requires paid plan — may return 0 on free tier)
+
+  // ── SOURCE 1: AlphaVantage TOP_GAINERS_LOSERS (catches MASK/SPRC/CGTL) ──
+  try {
+    const av=await alphaVantageGainers();
+    for(const g of av){
+      if(g.c<=CONFIG.MAX_PRICE&&!gainers.find(x=>x.ticker===g.ticker))
+        gainers.push(g);
+    }
+  }catch(_){}
+
+  // ── SOURCE 2: Alpaca screener (paid tier — may return 0 on free) ──
   try {
     const urls=[
       `/v1beta1/screener/stocks/movers?by=percent_change&top=${CONFIG.TOP_GAINERS_COUNT}&market_type=sip`,
@@ -540,15 +610,15 @@ const getTopGainers = async () => {
             if(price>=CONFIG.MIN_PRICE&&price<=CONFIG.MAX_PRICE&&pct>=CONFIG.MIN_SPIKE_PCT&&!gainers.find(x=>x.ticker===g.symbol))
               gainers.push({ticker:g.symbol,c:price,dp:pct,v:g.volume||0,source:"alpaca"});
           }
-          if(gainers.length){lastAlpacaTickers=gainers.map(g=>g.ticker);console.log(`📡 Alpaca screener: ${gainers.length}`);break;}
+          if(list.length){lastAlpacaTickers=gainers.map(g=>g.ticker);console.log(`📡 Alpaca screener: +${list.length}`);break;}
         }
       }catch(_){continue;}
     }
   }catch(_){}
 
-  if(gainers.length<50){  // always run snapshot as backup
-    // Build broadest possible universe — Alpaca screener already catches regular hours
-    // For pre-market we need to scan wide: yesterday movers + last scan + seeds + common runners
+
+  // ── SOURCE 3: Snapshot scan (always runs — confirms vol/price, adds seeds) ──
+  {
     const BROAD_UNIVERSE=[
       // High-frequency small cap runners that appear repeatedly
       "PRTS","MNTS","YMAT","VCIG","SNGX","QTEX","QTEXW","CPSH","RDWU","PHGE",
@@ -569,7 +639,9 @@ const getTopGainers = async () => {
       // OTC/penny momentum
       "VCIG","RDWU","CPSH","LGHL","NNVC","NCPL","IPWR","FGL","SNGX","AMSS",
     ];
-    const watchSet=new Set([...yesterdayMovers,...lastAlpacaTickers.slice(0,80),...SEED_TICKERS,...BROAD_UNIVERSE]);
+    // Include AlphaVantage tickers in snapshot to get fresh vol/price confirmation
+    const avTickers=gainers.filter(g=>g.source==="alphavantage").map(g=>g.ticker);
+    const watchSet=new Set([...avTickers,...yesterdayMovers,...lastAlpacaTickers.slice(0,80),...SEED_TICKERS,...BROAD_UNIVERSE]);
     const tickers=[...watchSet].filter(t=>t&&t.length<=6).slice(0,500);
     const minVol=isPre?CONFIG.PRE_MIN_VOLUME:10000;
     for(let i=0;i<tickers.length;i+=100){
@@ -628,8 +700,36 @@ const analyzeStock = async (ticker,price,pct) => {
 // ════════════════════════════════════════════════════════════════════════════
 // BRAIN / MEMORY
 // ════════════════════════════════════════════════════════════════════════════
+// ── SCORING SYSTEM — learns which gap/vol/float/news combos precede runners ──
+const gapBucket  = p => p>=200?"200+":p>=100?"100-200":p>=50?"50-100":p>=20?"20-50":"5-20";
+const volBucket  = r => r>=20?"20x+":r>=10?"10-20x":r>=5?"5-10x":"<5x";
+const floatBucket= f => { const n=parseFloat(f); if(!n||isNaN(n))return "unknown"; return n<5?"<5M":n<20?"5-20M":n<50?"20-50M":"50M+"; };
+const hourBucket = h => `${h}h`;
+
+// Returns 0-100 score: how often this feature combo led to a winner / big runner
+const scoreCandidate = (gapPct,volRatio,floatVal,hasNews,hour) => {
+  const fs=BRAIN.featureStats; let score=50, signals=0;
+  const lookup=(bucket,key)=>{ const b=bucket[key]; if(b&&b.trades>=3){signals++; return (b.wins/b.trades);} return null; };
+  const gw=lookup(fs.gap,gapBucket(gapPct));
+  const vw=lookup(fs.vol,volBucket(volRatio));
+  const flw=lookup(fs.float,floatBucket(floatVal));
+  const hw=lookup(fs.hour,hourBucket(hour));
+  const nb=hasNews?fs.news.yes:fs.news.no;
+  const nw=nb.trades>=3?(nb.wins/nb.trades):null;
+  // Weighted blend — gap & volume matter most for momentum runners
+  const weights=[[gw,30],[vw,25],[flw,15],[nw,15],[hw,15]];
+  let wsum=0,used=0;
+  for(const[rate,w] of weights){ if(rate!=null){wsum+=rate*w; used+=w;} }
+  if(used>0) score=Math.round((wsum/used)*100);
+  // Bonus: small float + huge gap + news historically = biggest runners
+  const bigRate=(fs.gap[gapBucket(gapPct)]?.bigRunners||0);
+  if(bigRate>=2 && floatBucket(floatVal)==="<5M") score=Math.min(100,score+10);
+  return {score,signals,detail:`gap:${gapBucket(gapPct)} vol:${volBucket(volRatio)} float:${floatBucket(floatVal)} news:${hasNews?"Y":"N"}`};
+};
+
 const learnFromTrade = async trade => {
   const won=trade.pnl>0;
+  const bigRunner=(trade.pnlPct||0)>=50; // caught a 50%+ move
   BRAIN.totalTrades++;won?BRAIN.wins++:BRAIN.losses++;BRAIN.totalPnL+=trade.pnl||0;
   if(trade.setup){
     if(!BRAIN.bestSetups[trade.setup])BRAIN.bestSetups[trade.setup]={trades:0,wins:0,winRate:0};
@@ -637,6 +737,15 @@ const learnFromTrade = async trade => {
     if(won)BRAIN.bestSetups[trade.setup].wins++;
     BRAIN.bestSetups[trade.setup].winRate=(BRAIN.bestSetups[trade.setup].wins/BRAIN.bestSetups[trade.setup].trades)*100;
   }
+  // ── Update feature stats so scoreCandidate gets smarter every trade ──
+  const fs=BRAIN.featureStats;
+  const bump=(bucket,key)=>{ if(!bucket[key])bucket[key]={trades:0,wins:0,bigRunners:0}; bucket[key].trades++; if(won)bucket[key].wins++; if(bigRunner)bucket[key].bigRunners++; };
+  if(trade.gapPct!=null) bump(fs.gap,gapBucket(trade.gapPct));
+  if(trade.volRatio!=null) bump(fs.vol,volBucket(trade.volRatio));
+  if(trade.floatVal!=null) bump(fs.float,floatBucket(trade.floatVal));
+  if(trade.entryHour!=null) bump(fs.hour,hourBucket(trade.entryHour));
+  const nb=trade.hasCatalyst?fs.news.yes:fs.news.no; nb.trades++; if(won)nb.wins++; if(bigRunner)nb.big++;
+
   if(won&&!BRAIN.bestTickers.includes(trade.symbol)){BRAIN.bestTickers.unshift(trade.symbol);BRAIN.bestTickers=BRAIN.bestTickers.slice(0,20);}
   BRAIN.recentPerformance.unshift({...trade,won});BRAIN.recentPerformance=BRAIN.recentPerformance.slice(0,20);
   const rw=BRAIN.recentPerformance.filter(t=>t.won).length,rt=BRAIN.recentPerformance.length;
@@ -650,7 +759,10 @@ const learnFromTrade = async trade => {
     const lesson=await groq(`Trade: ${trade.symbol} | ${won?"WIN ✅":"LOSS ❌"}\nP&L: $${trade.pnl?.toFixed(2)} | Setup: ${trade.setup} | Exit: ${trade.exitReason}\nONE lesson for Jeezy strategy:`,50);
     BRAIN.lessons.unshift(lesson.trim());BRAIN.lessons=BRAIN.lessons.slice(0,10);BRAIN.lastLearned=new Date().toISOString();
   }catch(_){}
-  await supabase("bot_trade_memory",{method:"POST",body:JSON.stringify({symbol:trade.symbol,side:"LONG",entry_price:trade.entryPrice,exit_price:trade.exitPrice,pnl:trade.pnl,pnl_pct:trade.pnlPct,entry_reason:trade.reason,exit_reason:trade.exitReason,setup_type:trade.setup,won,entry_hour:new Date().getHours(),day_of_week:new Date().getDay()})}).catch(()=>{});
+  // Persist trade WITH features so the brain rebuilds correctly on restart
+  await supabase("bot_trade_memory",{method:"POST",body:JSON.stringify({symbol:trade.symbol,side:"LONG",entry_price:trade.entryPrice,exit_price:trade.exitPrice,pnl:trade.pnl,pnl_pct:trade.pnlPct,entry_reason:trade.reason,exit_reason:trade.exitReason,setup_type:trade.setup,won,entry_hour:trade.entryHour??new Date().getHours(),day_of_week:new Date().getDay(),gap_pct:trade.gapPct??null,vol_ratio:trade.volRatio??null,float_val:trade.floatVal??null,has_catalyst:trade.hasCatalyst??false})}).catch(()=>{});
+  // Persist brain snapshot so featureStats survive redeploy
+  await saveBrainState().catch(()=>{});
 };
 
 const saveYesterdayMovers = async () => {
@@ -660,39 +772,84 @@ const saveYesterdayMovers = async () => {
   console.log(`💾 Saved ${yesterdayMovers.length} movers for tomorrow`);
 };
 
+// Persist full brain snapshot (featureStats etc.) so learning survives redeploys
+const saveBrainState = async () => {
+  try {
+    const snapshot={
+      totalTrades:BRAIN.totalTrades,wins:BRAIN.wins,losses:BRAIN.losses,totalPnL:BRAIN.totalPnL,
+      bestSetups:BRAIN.bestSetups,bestTickers:BRAIN.bestTickers,
+      adjustedFirstTarget:BRAIN.adjustedFirstTarget,adjustedStop:BRAIN.adjustedStop,adjustedConviction:BRAIN.adjustedConviction,
+      featureStats:BRAIN.featureStats,lessons:BRAIN.lessons,
+    };
+    await supabase("bot_watchlist",{method:"POST",body:JSON.stringify({label:"brain_state",tickers:JSON.stringify(snapshot).slice(0,90000),ts:new Date().toISOString()})});
+  }catch(_){}
+};
+
 const loadMemory = async () => {
   try {
     const d=await supabase("bot_watchlist?label=eq.yesterday_movers&order=created_at.desc&limit=1");
     if(Array.isArray(d)&&d[0]?.tickers){yesterdayMovers=d[0].tickers.split(",").filter(Boolean);console.log(`📋 Yesterday movers: ${yesterdayMovers.join(", ")}`);}
   }catch(_){}
+  // ── Restore full brain snapshot first (featureStats, adjustments, etc.) ──
+  let snapshotLoaded=false;
   try {
-    const mem=await supabase("bot_trade_memory?order=created_at.desc&limit=200");
-    if(!Array.isArray(mem)||!mem.length){console.log("🧠 Fresh start");return;}
-    BRAIN.totalTrades=mem.length;BRAIN.wins=mem.filter(m=>m.won).length;BRAIN.losses=mem.filter(m=>!m.won).length;
-    BRAIN.totalPnL=mem.reduce((s,m)=>s+parseFloat(m.pnl||0),0);
-    mem.forEach(m=>{
-      if(m.setup_type){
-        if(!BRAIN.bestSetups[m.setup_type])BRAIN.bestSetups[m.setup_type]={trades:0,wins:0,winRate:0};
-        BRAIN.bestSetups[m.setup_type].trades++;
-        if(m.won)BRAIN.bestSetups[m.setup_type].wins++;
-        BRAIN.bestSetups[m.setup_type].winRate=(BRAIN.bestSetups[m.setup_type].wins/BRAIN.bestSetups[m.setup_type].trades)*100;
-      }
-      if(m.won&&!BRAIN.bestTickers.includes(m.symbol))BRAIN.bestTickers.push(m.symbol);
-    });
-    BRAIN.bestTickers=BRAIN.bestTickers.slice(0,20);
-    const lessons=await supabase("bot_lessons?order=created_at.desc&limit=20");
-    if(Array.isArray(lessons))BRAIN.lessons=lessons.map(l=>l.lesson).filter(Boolean);
-    console.log(`🧠 Brain: ${mem.length} trades | ${((BRAIN.wins/BRAIN.totalTrades)*100).toFixed(0)}% WR | $${BRAIN.totalPnL.toFixed(0)} P&L`);
+    const bs=await supabase("bot_watchlist?label=eq.brain_state&order=created_at.desc&limit=1");
+    if(Array.isArray(bs)&&bs[0]?.tickers){
+      const s=JSON.parse(bs[0].tickers);
+      Object.assign(BRAIN,{
+        totalTrades:s.totalTrades||0,wins:s.wins||0,losses:s.losses||0,totalPnL:s.totalPnL||0,
+        bestSetups:s.bestSetups||{},bestTickers:s.bestTickers||[],
+        adjustedFirstTarget:s.adjustedFirstTarget||30,adjustedStop:s.adjustedStop||15,adjustedConviction:s.adjustedConviction||5,
+        featureStats:s.featureStats||BRAIN.featureStats,lessons:s.lessons||[],
+      });
+      CONFIG.FIRST_TARGET_PCT=BRAIN.adjustedFirstTarget;CONFIG.HARD_STOP_PCT=BRAIN.adjustedStop;CONFIG.MIN_CONVICTION=BRAIN.adjustedConviction;
+      snapshotLoaded=true;
+      console.log(`🧠 Brain RESTORED: ${BRAIN.totalTrades} trades | ${BRAIN.totalTrades>0?((BRAIN.wins/BRAIN.totalTrades)*100).toFixed(0):0}% WR | $${BRAIN.totalPnL.toFixed(0)} | features learned`);
+    }
+  }catch(e){console.log("Brain snapshot:",e.message);}
+
+  // ── Rebuild from raw trade rows (recomputes featureStats if no snapshot) ──
+  try {
+    const mem=await supabase("bot_trade_memory?order=created_at.desc&limit=300");
+    if(!Array.isArray(mem)||!mem.length){if(!snapshotLoaded)console.log("🧠 Fresh start — no history yet");}
+    else if(!snapshotLoaded){
+      BRAIN.totalTrades=mem.length;BRAIN.wins=mem.filter(m=>m.won).length;BRAIN.losses=mem.filter(m=>!m.won).length;
+      BRAIN.totalPnL=mem.reduce((s,m)=>s+parseFloat(m.pnl||0),0);
+      const fs=BRAIN.featureStats;
+      const bump=(bucket,key,won,big)=>{ if(!bucket[key])bucket[key]={trades:0,wins:0,bigRunners:0}; bucket[key].trades++; if(won)bucket[key].wins++; if(big)bucket[key].bigRunners++; };
+      mem.forEach(m=>{
+        const won=!!m.won, big=(parseFloat(m.pnl_pct)||0)>=50;
+        if(m.setup_type){
+          if(!BRAIN.bestSetups[m.setup_type])BRAIN.bestSetups[m.setup_type]={trades:0,wins:0,winRate:0};
+          BRAIN.bestSetups[m.setup_type].trades++;
+          if(won)BRAIN.bestSetups[m.setup_type].wins++;
+          BRAIN.bestSetups[m.setup_type].winRate=(BRAIN.bestSetups[m.setup_type].wins/BRAIN.bestSetups[m.setup_type].trades)*100;
+        }
+        if(won&&!BRAIN.bestTickers.includes(m.symbol))BRAIN.bestTickers.push(m.symbol);
+        if(m.gap_pct!=null) bump(fs.gap,gapBucket(parseFloat(m.gap_pct)),won,big);
+        if(m.vol_ratio!=null) bump(fs.vol,volBucket(parseFloat(m.vol_ratio)),won,big);
+        if(m.float_val!=null) bump(fs.float,floatBucket(m.float_val),won,big);
+        if(m.entry_hour!=null) bump(fs.hour,hourBucket(m.entry_hour),won,big);
+        const nb=m.has_catalyst?fs.news.yes:fs.news.no; nb.trades++; if(won)nb.wins++; if(big)nb.big++;
+      });
+      BRAIN.bestTickers=BRAIN.bestTickers.slice(0,20);
+      const lessons=await supabase("bot_lessons?order=created_at.desc&limit=20");
+      if(Array.isArray(lessons))BRAIN.lessons=lessons.map(l=>l.lesson).filter(Boolean);
+      console.log(`🧠 Brain rebuilt from ${mem.length} trades | ${((BRAIN.wins/BRAIN.totalTrades)*100).toFixed(0)}% WR | $${BRAIN.totalPnL.toFixed(0)} P&L`);
+    }
   }catch(e){console.log("Memory:",e.message);}
+
+  // ── Rebuild openTrades from live TZ positions (so stops fire after restart) ──
   try {
     const positions=await tzGetPositions();
     if(positions.length){
       for(const p of positions){
         if(!openTrades[p.symbol]){
-          openTrades[p.symbol]={reason:"Restored",setup:"unknown",entryPrice:parseFloat(p.avg_entry_price),qty:parseFloat(p.qty),halfSold:false,peakPrice:parseFloat(p.current_price),volumeReduced:false,time:new Date().toISOString()};
-          console.log(`📍 Restored: ${p.symbol} x${p.qty} @ $${p.avg_entry_price}`);
+          openTrades[p.symbol]={reason:"Restored on startup",setup:"unknown",entryPrice:parseFloat(p.avg_entry_price),qty:parseFloat(p.qty),halfSold:false,peakPrice:parseFloat(p.current_price)||parseFloat(p.avg_entry_price),volumeReduced:false,time:new Date().toISOString(),restored:true};
+          console.log(`📍 Restored position (stops active): ${p.symbol} x${p.qty} @ $${p.avg_entry_price}`);
         }
       }
+      console.log(`🛡️ ${positions.length} positions under stop-loss management`);
     }
   }catch(e){console.log("Restore:",e.message);}
 };
@@ -719,33 +876,77 @@ const managePositions = async (positions,sess) => {
 
     if(!entry.halfSold&&pnlPct>=CONFIG.FIRST_TARGET_PCT){
       const hq=Math.floor(parseFloat(pos.qty)/2);
-      if(hq>=1){const r=await tzPlaceOrder(sym,"Sell",hq,sess);if(r.success){entry.halfSold=true;tradeLog.unshift({type:"PARTIAL_SELL",symbol:sym,qty:hq,price:cur,pnlPct:pnlPct.toFixed(1),reason:`First target +${CONFIG.FIRST_TARGET_PCT}%`,ts:new Date().toISOString()});}}
+      if(hq>=1){const r=await tzPlaceOrder(sym,"Sell",hq,sess,cur);if(r.success){entry.halfSold=true;tradeLog.unshift({type:"PARTIAL_SELL",symbol:sym,qty:hq,price:cur,pnlPct:pnlPct.toFixed(1),reason:`First target +${CONFIG.FIRST_TARGET_PCT}%`,ts:new Date().toISOString()});}}
     }
     if(entry.halfSold&&fromPeak<=-trailPct){
-      const r=await tzPlaceOrder(sym,"Sell",pos.qty,sess);
-      if(r.success){const t={symbol:sym,pnl:parseFloat(pos.unrealized_pl),pnlPct,entryPrice:pos.avg_entry_price,exitPrice:cur,reason:entry.reason,setup:entry.setup,exitReason:"TRAIL STOP",type:"SELL",price:cur,ts:new Date().toISOString()};tradeLog.unshift(t);await learnFromTrade(t);delete openTrades[sym];delete buyPctHistory[sym];continue;}
+      const r=await tzPlaceOrder(sym,"Sell",pos.qty,sess,cur);
+      if(r.success){const t={symbol:sym,pnl:parseFloat(pos.unrealized_pl),pnlPct,entryPrice:pos.avg_entry_price,exitPrice:cur,reason:entry.reason,setup:entry.setup,exitReason:"TRAIL STOP",gapPct:entry.gapPct,volRatio:entry.volRatio,floatVal:entry.floatVal,hasCatalyst:entry.hasCatalyst,entryHour:entry.entryHour,type:"SELL",price:cur,ts:new Date().toISOString()};tradeLog.unshift(t);await learnFromTrade(t);delete openTrades[sym];delete buyPctHistory[sym];continue;}
     }
     if(pnlPct<=-CONFIG.HARD_STOP_PCT){
-      const r=await tzPlaceOrder(sym,"Sell",pos.qty,sess);
-      if(r.success){const t={symbol:sym,pnl:parseFloat(pos.unrealized_pl),pnlPct,entryPrice:pos.avg_entry_price,exitPrice:cur,reason:entry.reason,setup:entry.setup,exitReason:"HARD STOP",type:"STOP",price:cur,ts:new Date().toISOString()};tradeLog.unshift(t);await learnFromTrade(t);delete openTrades[sym];continue;}
+      const r=await tzPlaceOrder(sym,"Sell",pos.qty,sess,cur);
+      if(r.success){const t={symbol:sym,pnl:parseFloat(pos.unrealized_pl),pnlPct,entryPrice:pos.avg_entry_price,exitPrice:cur,reason:entry.reason,setup:entry.setup,exitReason:"HARD STOP",gapPct:entry.gapPct,volRatio:entry.volRatio,floatVal:entry.floatVal,hasCatalyst:entry.hasCatalyst,entryHour:entry.entryHour,type:"STOP",price:cur,ts:new Date().toISOString()};tradeLog.unshift(t);await learnFromTrade(t);delete openTrades[sym];continue;}
     }
     if(footprintExhaustion&&entry.halfSold){
-      const r=await tzPlaceOrder(sym,"Sell",pos.qty,sess);
-      if(r.success){const t={symbol:sym,pnl:parseFloat(pos.unrealized_pl),pnlPct,entryPrice:pos.avg_entry_price,exitPrice:cur,reason:entry.reason,setup:entry.setup,exitReason:"OF EXHAUSTION",type:"SELL",price:cur,ts:new Date().toISOString()};tradeLog.unshift(t);await learnFromTrade(t);delete openTrades[sym];delete buyPctHistory[sym];continue;}
+      const r=await tzPlaceOrder(sym,"Sell",pos.qty,sess,cur);
+      if(r.success){const t={symbol:sym,pnl:parseFloat(pos.unrealized_pl),pnlPct,entryPrice:pos.avg_entry_price,exitPrice:cur,reason:entry.reason,setup:entry.setup,exitReason:"OF EXHAUSTION",gapPct:entry.gapPct,volRatio:entry.volRatio,floatVal:entry.floatVal,hasCatalyst:entry.hasCatalyst,entryHour:entry.entryHour,type:"SELL",price:cur,ts:new Date().toISOString()};tradeLog.unshift(t);await learnFromTrade(t);delete openTrades[sym];delete buyPctHistory[sym];continue;}
     }
     if(of?.liqMap?.bidWallBroken&&entry.halfSold){
-      const r=await tzPlaceOrder(sym,"Sell",pos.qty,sess);
-      if(r.success){const t={symbol:sym,pnl:parseFloat(pos.unrealized_pl),pnlPct,entryPrice:pos.avg_entry_price,exitPrice:cur,reason:entry.reason,setup:entry.setup,exitReason:"BID WALL BROKEN",type:"SELL",price:cur,ts:new Date().toISOString()};tradeLog.unshift(t);await learnFromTrade(t);delete openTrades[sym];continue;}
+      const r=await tzPlaceOrder(sym,"Sell",pos.qty,sess,cur);
+      if(r.success){const t={symbol:sym,pnl:parseFloat(pos.unrealized_pl),pnlPct,entryPrice:pos.avg_entry_price,exitPrice:cur,reason:entry.reason,setup:entry.setup,exitReason:"BID WALL BROKEN",gapPct:entry.gapPct,volRatio:entry.volRatio,floatVal:entry.floatVal,hasCatalyst:entry.hasCatalyst,entryHour:entry.entryHour,type:"SELL",price:cur,ts:new Date().toISOString()};tradeLog.unshift(t);await learnFromTrade(t);delete openTrades[sym];continue;}
     }
     if(tech?.volDryUp&&!entry.volumeReduced){
       const ofWeak=!of||parseFloat(of.footprint?.buyPct||52)<52||of.entryScore<1;
-      if(ofWeak){const rq=Math.floor(parseFloat(pos.qty)*CONFIG.VOLUME_DRY_REDUCE);if(rq>=1){const r=await tzPlaceOrder(sym,"Sell",rq,sess);if(r.success){entry.volumeReduced=true;tradeLog.unshift({type:"REDUCE",symbol:sym,qty:rq,price:cur,reason:"Vol dry + weak OF",ts:new Date().toISOString()});}}}
+      if(ofWeak){const rq=Math.floor(parseFloat(pos.qty)*CONFIG.VOLUME_DRY_REDUCE);if(rq>=1){const r=await tzPlaceOrder(sym,"Sell",rq,sess,cur);if(r.success){entry.volumeReduced=true;tradeLog.unshift({type:"REDUCE",symbol:sym,qty:rq,price:cur,reason:"Vol dry + weak OF",ts:new Date().toISOString()});}}}
     }
     if(tech?.ema9&&cur<parseFloat(tech.ema9)&&entry.halfSold){
-      const r=await tzPlaceOrder(sym,"Sell",pos.qty,sess);
-      if(r.success){const t={symbol:sym,pnl:parseFloat(pos.unrealized_pl),pnlPct,entryPrice:pos.avg_entry_price,exitPrice:cur,reason:entry.reason,setup:entry.setup,exitReason:"BELOW 9 EMA",type:"SELL",price:cur,ts:new Date().toISOString()};tradeLog.unshift(t);await learnFromTrade(t);delete openTrades[sym];}
+      const r=await tzPlaceOrder(sym,"Sell",pos.qty,sess,cur);
+      if(r.success){const t={symbol:sym,pnl:parseFloat(pos.unrealized_pl),pnlPct,entryPrice:pos.avg_entry_price,exitPrice:cur,reason:entry.reason,setup:entry.setup,exitReason:"BELOW 9 EMA",gapPct:entry.gapPct,volRatio:entry.volRatio,floatVal:entry.floatVal,hasCatalyst:entry.hasCatalyst,entryHour:entry.entryHour,type:"SELL",price:cur,ts:new Date().toISOString()};tradeLog.unshift(t);await learnFromTrade(t);delete openTrades[sym];}
     }
   }
+};
+
+// ════════════════════════════════════════════════════════════════════════════
+// END-OF-DAY LIQUIDATION (7:55pm ET) — sell all EXCEPT green-momentum holds
+// ════════════════════════════════════════════════════════════════════════════
+let eodDoneStamp = "";
+const runEODLiquidation = async (positions,sess) => {
+  const today=getETTime().toISOString().split("T")[0];
+  if(eodDoneStamp===today) return; // once per day
+  eodDoneStamp=today;
+  console.log(`🌙 EOD LIQUIDATION (7:55pm ET) — evaluating ${positions.length} positions`);
+  for(const pos of positions){
+    const sym=pos.symbol,cur=parseFloat(pos.current_price),pnlPct=parseFloat(pos.unrealized_plpc)*100;
+    const tech=await getFullTechnicals(sym,cur).catch(()=>null);
+    // KEEP overnight only if: green AND above 9EMA AND above VWAP AND uptrend (rising)
+    const green=pnlPct>0;
+    const aboveEma=tech?.ema9&&cur>=parseFloat(tech.ema9);
+    const aboveVwap=tech?.aboveVWAP;
+    const rising=tech?.uptrend;
+    const keepOvernight=green&&aboveEma&&aboveVwap&&rising;
+    if(keepOvernight){
+      // Trim 50%, ride the rest overnight (high-conviction runner)
+      const hq=Math.floor(parseFloat(pos.qty)/2);
+      if(hq>=1){
+        const r=await tzPlaceOrder(sym,"Sell",hq,sess,cur);
+        if(r.success){
+          if(openTrades[sym]){openTrades[sym].halfSold=true;openTrades[sym].overnightHold=true;}
+          tradeLog.unshift({type:"PARTIAL_SELL",symbol:sym,qty:hq,price:cur,pnlPct:pnlPct.toFixed(1),reason:"EOD trim — riding 50% overnight (green momentum)",sess,ts:new Date().toISOString()});
+          console.log(`🌙 KEEP ${sym}: green+momentum → trimmed 50%, riding ${parseFloat(pos.qty)-hq} overnight`);
+        }
+      }
+    } else {
+      // Full liquidation
+      const r=await tzPlaceOrder(sym,"Sell",pos.qty,sess,cur);
+      if(r.success){
+        const t={symbol:sym,pnl:parseFloat(pos.unrealized_pl),pnlPct,entryPrice:pos.avg_entry_price,exitPrice:cur,reason:openTrades[sym]?.reason||"EOD",setup:openTrades[sym]?.setup||"unknown",exitReason:"EOD LIQUIDATION",type:"SELL",price:cur,sess,ts:new Date().toISOString(),gapPct:openTrades[sym]?.gapPct,volRatio:openTrades[sym]?.volRatio,floatVal:openTrades[sym]?.floatVal,hasCatalyst:openTrades[sym]?.hasCatalyst,entryHour:openTrades[sym]?.entryHour};
+        tradeLog.unshift(t);await learnFromTrade(t);delete openTrades[sym];delete buyPctHistory[sym];
+        console.log(`🌙 SOLD ${sym}: ${pnlPct>=0?"+":""}${pnlPct.toFixed(1)}% (didn't meet overnight criteria)`);
+      }
+    }
+  }
+  await saveYesterdayMovers().catch(()=>{});
+  await saveBrainState().catch(()=>{});
+  console.log(`🌙 EOD liquidation complete`);
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -755,34 +956,64 @@ const autoTrade = async () => {
   lastScanTime=new Date().toISOString();
   const{isPre,isOpen,isAH,sess}=getSession();
 
-  // Save yesterday's movers at 3:55pm ET
   const etNow=getETTime();
-  if(isOpen&&etNow.getUTCHours()===19&&etNow.getUTCMinutes()>=55) await saveYesterdayMovers();
+  const etH=etNow.getUTCHours(),etM=etNow.getUTCMinutes();
+
+  // Save movers at 3:55pm ET (regular close)
+  if(isOpen&&etH===15&&etM>=55) await saveYesterdayMovers();
 
   try {
     const[positions,account]=await Promise.all([tzGetPositions().catch(()=>[]),tzGetAccount().catch(()=>null)]);
     if((isOpen||isPre||isAH)&&positions.length) await managePositions(positions,sess);
+
+    // ── EOD LIQUIDATION at 7:55pm ET (end of after-hours) ──
+    if(isAH&&etH===CONFIG.EOD_LIQUIDATE_HOUR&&etM>=CONFIG.EOD_LIQUIDATE_MIN&&positions.length){
+      await runEODLiquidation(positions,sess);
+      return; // no new entries during EOD sweep
+    }
+
     if(!canEnter(sess)){console.log(`⏸️ [${sess}] — no new entries`);return;}
+
+    // ── POSITION CAP — refuse all new entries at MAX_POSITIONS ──
+    if(positions.length>=CONFIG.MAX_POSITIONS){
+      console.log(`🛑 At max positions (${positions.length}/${CONFIG.MAX_POSITIONS}) — managing only, no new buys`);
+      return;
+    }
+
+    // ── CASH FLOOR — stop rejected-order spam when nearly tapped out ──
     const cash=account?.cash||0;
-    if(cash<CONFIG.MIN_POSITION_USD){console.log(`⚠️ Low cash: $${cash}`);return;}
+    const equity=account?.equity||0;
+    const cashFloor=equity*CONFIG.CASH_FLOOR_PCT;
+    if(cash<Math.max(CONFIG.MIN_POSITION_USD,cashFloor)){
+      console.log(`💵 Cash $${cash.toFixed(0)} below floor $${cashFloor.toFixed(0)} (15% of equity) — no new entries`);
+      return;
+    }
+    const slotsLeft=CONFIG.MAX_POSITIONS-positions.length;
     const gainers=await getTopGainers();
     lastGainers=gainers.filter(g=>!g.haltRisk).slice(0,20);
     if(!gainers.length){console.log("⏭️ No gainers");return;}
     console.log(`📊 ${gainers.length} movers | Top: ${gainers.slice(0,5).map(g=>`${g.ticker}+${g.dp?.toFixed(0)}%`).join(", ")}`);
     const owned=positions.map(p=>p.symbol);
-    const candidates=gainers.filter(g=>!g.haltRisk&&!owned.includes(g.ticker)).slice(0,10);
+    const candidates=gainers.filter(g=>!g.haltRisk&&!owned.includes(g.ticker)).slice(0,12);
     if(!candidates.length) return;
     const results=await Promise.all(candidates.map(async g=>{
       const[info,tech,l2,of]=await Promise.all([analyzeStock(g.ticker,g.c,g.dp),getFullTechnicals(g.ticker,g.c),getLevel2(g.ticker),getOrderFlow(g.ticker,g.c)]);
       return {...g,info,tech,l2,of};
     }));
     const minVol=isPre?CONFIG.PRE_MIN_VOLUME:10000;
-    const qualified=results.filter(s=>{
+    let qualified=results.filter(s=>{
       const volOk=parseFloat(s.tech?.volRatio||0)>=CONFIG.MIN_VOLUME_RATIO||s.dp>=20||s.v>=minVol;
       if(!volOk) return s.of?.footprint?.entryOk&&s.of?.liqMap?.entryFavorable;
       return volOk;
     });
     if(!qualified.length){console.log("⏭️ No qualified");return;}
+
+    // ── LEARNED SCORING — rank by historical hit-rate for this feature combo ──
+    qualified=qualified.map(s=>{
+      const sc=scoreCandidate(s.dp,parseFloat(s.tech?.volRatio||0),s.info?.float,s.info?.hasCatalyst,etH);
+      return {...s,_score:sc.score,_scoreDetail:sc.detail,_scoreSignals:sc.signals};
+    }).sort((a,b)=>b._score-a._score);
+    console.log(`🎯 Scored: ${qualified.slice(0,5).map(s=>`${s.ticker}=${s._score}`).join(" ")}`);
 
     const candStr=qualified.slice(0,6).map(s=>{
       const t=s.tech,l=s.l2,of=s.of;
@@ -800,7 +1031,9 @@ const autoTrade = async () => {
     // AI lacks enough pre-market candles to score accurately
     // Rule: big % move (+20%+) + min volume = enter directly
     if(isPre||isAH){
+      let opened=0;
       for(const stock of qualified){
+        if(opened>=slotsLeft){console.log(`🛑 Filled ${slotsLeft} slots — stopping`);break;}
         if(owned.includes(stock.ticker)) continue;
         if(stock.dp<20||stock.v<CONFIG.PRE_MIN_VOLUME) continue;
         let qty=Math.floor((cash*CONFIG.POSITION_PCT)/stock.c);
@@ -808,16 +1041,16 @@ const autoTrade = async () => {
         if(stock.c<0.1) qty=Math.min(qty,50000);
         if(qty<1) continue;
         const setup=stock.tech?.sdFlip?.detected?"sd_flip":stock.tech?.dipRip?.detected?"dip_rip_ema":"ah_gapper";
-        const reason=`${sess} +${stock.dp?.toFixed(1)}% momentum | OF:${stock.of?.grade||"?"}`;
-        console.log(`🚀 BUY ${stock.ticker} x${qty} @ $${stock.c} | ${setup} | PRE/AH direct | ${sess}`);
+        const reason=`${sess} +${stock.dp?.toFixed(1)}% | score:${stock._score} | OF:${stock.of?.grade||"?"}`;
+        console.log(`🚀 BUY ${stock.ticker} x${qty} @ $${stock.c} | ${setup} | score:${stock._score} | ${sess}`);
         const order=await tzPlaceOrder(stock.ticker,"Buy",qty,sess,stock.c);
         if(order.success){
-          openTrades[stock.ticker]={reason,setup,conviction:6,entryPrice:stock.c,qty,halfSold:false,peakPrice:stock.c,volumeReduced:false,time:new Date().toISOString(),hasCatalyst:stock.info?.hasCatalyst,sess};
+          openTrades[stock.ticker]={reason,setup,conviction:6,entryPrice:stock.c,qty,halfSold:false,peakPrice:stock.c,volumeReduced:false,time:new Date().toISOString(),hasCatalyst:stock.info?.hasCatalyst,sess,gapPct:stock.dp,volRatio:parseFloat(stock.tech?.volRatio||0),floatVal:stock.info?.float,entryHour:etH};
           buyPctHistory[stock.ticker]=[];
           tradeLog.unshift({type:"BUY",symbol:stock.ticker,qty,price:stock.c,conviction:6,reason,setup,target:(stock.c*(1+CONFIG.FIRST_TARGET_PCT/100)).toFixed(4),stop:(stock.c*(1-CONFIG.HARD_STOP_PCT/100)).toFixed(4),sess,ts:new Date().toISOString()});
-          await supabase("pulsetrader_trades",{method:"POST",body:JSON.stringify({symbol:stock.ticker,side:"LONG",qty,entry_price:stock.c,reason:`AUTO[${setup}|c6|${sess}]: ${reason}`})}).catch(()=>{});
+          await supabase("pulsetrader_trades",{method:"POST",body:JSON.stringify({symbol:stock.ticker,side:"LONG",qty,entry_price:stock.c,reason:`AUTO[${setup}|c6|${sess}|sc${stock._score}]: ${reason}`})}).catch(()=>{});
           console.log(`✅ Bought ${stock.ticker} via TradeZero [${sess}]`);
-          owned.push(stock.ticker);
+          owned.push(stock.ticker); opened++;
         } else {
           console.log(`❌ Order failed ${stock.ticker}: ${order.orderStatus||order.error}`);
           await logError("order",`${stock.ticker}: ${JSON.stringify(order)}`);
@@ -826,15 +1059,28 @@ const autoTrade = async () => {
       return;
     }
 
-    // ── REGULAR hours: full Jeezy AI verdict ─────────────────────────────
-    const sessionRules=`Session: REGULAR — Full Jeezy rules. Conviction ${CONFIG.MIN_CONVICTION}+ required.`;
+    // ── REGULAR hours: Gemini catalyst read + Groq Jeezy verdict ──────────
+    // Layer 1: Gemini reads catalysts on top-scored names (free tier, top 3 only)
+    let geminiNotes="";
+    try {
+      const top3=qualified.slice(0,3);
+      const gPrompt=`You are a momentum day-trader analyst. For each small-cap stock below, in ONE line state if the catalyst/setup supports a 50-200% intraday runner (YES/MAYBE/NO + 4-word reason):\n\n`+
+        top3.map(s=>`${s.ticker} +${s.dp?.toFixed(0)}% $${s.c} float:${s.info?.float}M news:${s.info?.topHeadline||"none"}`).join("\n");
+      const gOut=await gemini(gPrompt,300);
+      if(gOut){geminiNotes="\n\nGEMINI CATALYST READ:\n"+gOut.trim();console.log("💎 Gemini:",gOut.trim().slice(0,160));}
+    }catch(_){}
+
+    // Layer 2: Groq final Jeezy verdict (fast structured scoring)
+    const sessionRules=`Session: REGULAR — Full Jeezy rules. Conviction ${CONFIG.MIN_CONVICTION}+ required. Prioritize higher learned-score names.`;
     const verdict=await groq(
-      `REAL stocks [REGULAR] — Jeezy strategy:\n\n${candStr}\n\n${sessionRules}\n\n`+
+      `REAL stocks [REGULAR] — Jeezy strategy:\n\n${candStr}${geminiNotes}\n\n${sessionRules}\n\n`+
       `Pick ALL qualifying (conviction ${CONFIG.MIN_CONVICTION}+).\nReply ONLY:\nBUY: TICKER | CONVICTION: X | SETUP: name | REASON: one line`,300
     );
     console.log("🤖",verdict);
 
+    let opened=0;
     for(const line of verdict.split("\n").filter(l=>l.startsWith("BUY:"))){
+      if(opened>=slotsLeft){console.log(`🛑 Filled ${slotsLeft} slots — stopping`);break;}
       const m=line.match(/BUY:\s*([A-Z]+)\s*\|\s*CONVICTION:\s*([\d.]+)/i);
       if(!m) continue;
       const ticker=m[1].toUpperCase(),conviction=parseFloat(m[2]);
@@ -850,14 +1096,15 @@ const autoTrade = async () => {
       const setup=line.match(/SETUP:\s*([a-z_]+)/i)?.[1]||"momentum";
       const reason=line.match(/REASON:\s*(.+)/i)?.[1]||"Jeezy signal";
       const finalConviction=conviction+(stock.info?.convictionBonus||0);
-      console.log(`🚀 BUY ${ticker} x${qty} @ $${stock.c} | ${setup} | c${finalConviction} | REGULAR`);
+      console.log(`🚀 BUY ${ticker} x${qty} @ $${stock.c} | ${setup} | c${finalConviction} | score:${stock._score} | REGULAR`);
       const order=await tzPlaceOrder(ticker,"Buy",qty,sess,stock.c);
       if(order.success){
-        openTrades[ticker]={reason,setup,conviction:finalConviction,entryPrice:stock.c,qty,halfSold:false,peakPrice:stock.c,volumeReduced:false,time:new Date().toISOString(),hasCatalyst:stock.info?.hasCatalyst,sess};
+        openTrades[ticker]={reason,setup,conviction:finalConviction,entryPrice:stock.c,qty,halfSold:false,peakPrice:stock.c,volumeReduced:false,time:new Date().toISOString(),hasCatalyst:stock.info?.hasCatalyst,sess,gapPct:stock.dp,volRatio:parseFloat(stock.tech?.volRatio||0),floatVal:stock.info?.float,entryHour:etH};
         buyPctHistory[ticker]=[];
         tradeLog.unshift({type:"BUY",symbol:ticker,qty,price:stock.c,conviction:finalConviction,reason,setup,target:(stock.c*(1+CONFIG.FIRST_TARGET_PCT/100)).toFixed(4),stop:(stock.c*(1-CONFIG.HARD_STOP_PCT/100)).toFixed(4),sess,ts:new Date().toISOString()});
-        await supabase("pulsetrader_trades",{method:"POST",body:JSON.stringify({symbol:ticker,side:"LONG",qty,entry_price:stock.c,reason:`AUTO[${setup}|c${finalConviction}|REGULAR]: ${reason}`})}).catch(()=>{});
+        await supabase("pulsetrader_trades",{method:"POST",body:JSON.stringify({symbol:ticker,side:"LONG",qty,entry_price:stock.c,reason:`AUTO[${setup}|c${finalConviction}|REGULAR|sc${stock._score}]: ${reason}`})}).catch(()=>{});
         console.log(`✅ Bought ${ticker} via TradeZero`);
+        owned.push(ticker); opened++;
       } else {
         console.log(`❌ Order failed ${ticker}: ${order.orderStatus||order.error}`);
         await logError("order",`${ticker}: ${JSON.stringify(order)}`);
@@ -907,17 +1154,21 @@ app.get("/api/autotrader/status", async(_,res)=>{
   const todayPnL=account?(account.pnl||0):0;
   const equity=account?account.equity:0;
   res.json({
-    active:autoTraderActive,last_scan:lastScanTime,session:sess,broker:"TradeZero",
-    open_positions:positions.length,max_positions:10,
+    active:autoTraderActive,last_scan:lastScanTime,session:sess,broker:"TradeZero",version:"14.0.0",
+    open_positions:positions.length,max_positions:CONFIG.MAX_POSITIONS,
+    slots_left:Math.max(0,CONFIG.MAX_POSITIONS-positions.length),
     equity:account?account.equity.toFixed(2):"—",
     cash:account?account.cash.toFixed(2):"—",
+    cash_floor:account?(account.equity*CONFIG.CASH_FLOOR_PCT).toFixed(2):"—",
     today_pnl:todayPnL.toFixed(2),
     today_pnl_pct:equity>0?((todayPnL/equity)*100).toFixed(2)+"%":"0.00%",
     profit_target:CONFIG.FIRST_TARGET_PCT+"%",
     stop_loss:CONFIG.HARD_STOP_PCT+"%",
-    config:{position_pct:(CONFIG.POSITION_PCT*100)+"%",first_target:CONFIG.FIRST_TARGET_PCT+"%",trail_stop:CONFIG.TRAIL_STOP_PCT+"%",hard_stop:CONFIG.HARD_STOP_PCT+"%",min_conviction:CONFIG.MIN_CONVICTION,sessions:"PRE+REGULAR+AH"},
+    config:{position_pct:(CONFIG.POSITION_PCT*100)+"%",max_positions:CONFIG.MAX_POSITIONS,cash_floor:(CONFIG.CASH_FLOOR_PCT*100)+"%",first_target:CONFIG.FIRST_TARGET_PCT+"%",trail_stop:CONFIG.TRAIL_STOP_PCT+"%",hard_stop:CONFIG.HARD_STOP_PCT+"%",min_conviction:CONFIG.MIN_CONVICTION,sessions:"PRE+REGULAR+AH (equal)",eod_liquidation:"7:55pm ET"},
+    scanner:{sources:["AlphaVantage","Alpaca","Finnhub","Snapshots"],av_calls_today:AV_CACHE.callsToday,av_budget:24},
+    ai:{gemini:!!process.env.GEMINI_KEY,groq:!!process.env.GROQ_API_KEY},
     recent_trades:tradeLog.slice(0,20),last_gainers:lastGainers,last_analysis:lastAnalysis,
-    brain:{total_trades:BRAIN.totalTrades,wins:BRAIN.wins,losses:BRAIN.losses,win_rate:BRAIN.totalTrades>0?((BRAIN.wins/BRAIN.totalTrades)*100).toFixed(1)+"%":"0%",total_pnl:BRAIN.totalPnL.toFixed(2),best_setups:BRAIN.bestSetups,best_tickers:BRAIN.bestTickers,lessons:BRAIN.lessons,adjusted_target:BRAIN.adjustedFirstTarget+"%",adjusted_stop:BRAIN.adjustedStop+"%"},
+    brain:{total_trades:BRAIN.totalTrades,wins:BRAIN.wins,losses:BRAIN.losses,win_rate:BRAIN.totalTrades>0?((BRAIN.wins/BRAIN.totalTrades)*100).toFixed(1)+"%":"0%",total_pnl:BRAIN.totalPnL.toFixed(2),best_setups:BRAIN.bestSetups,best_tickers:BRAIN.bestTickers,lessons:BRAIN.lessons,adjusted_target:BRAIN.adjustedFirstTarget+"%",adjusted_stop:BRAIN.adjustedStop+"%",feature_stats:BRAIN.featureStats},
     yesterday_movers:yesterdayMovers
   });
 });
@@ -1077,25 +1328,25 @@ app.get("/api/dashboard",async(req,res)=>{
   }catch(e){res.status(500).json({error:e.message});}
 });
 
-app.get("/health",(_,res)=>res.json({status:"ok",version:"13.0.0",strategy:"Jeezy Strategy — 6 Setups",broker:"TradeZero",sessions:"PRE + REGULAR + AH",auto_trader:autoTraderActive,brain_trades:BRAIN.totalTrades,session:getSession().sess,ts:new Date().toISOString()}));
+app.get("/health",(_,res)=>res.json({status:"ok",version:"14.0.0",strategy:"Jeezy Strategy — 6 Setups + learned scoring",broker:"TradeZero",sessions:"PRE + REGULAR + AH",scanner:"AlphaVantage + Alpaca + Finnhub",ai:"Gemini + Groq",auto_trader:autoTraderActive,brain_trades:BRAIN.totalTrades,max_positions:CONFIG.MAX_POSITIONS,session:getSession().sess,ts:new Date().toISOString()}));
 
 // ════════════════════════════════════════════════════════════════════════════
 // START
 // ════════════════════════════════════════════════════════════════════════════
 const PORT=process.env.PORT||3001;
 app.listen(PORT, async()=>{
-  console.log(`⚡ PulseTrader v13.0 on port ${PORT}`);
+  console.log(`⚡ PulseTrader v14.0 on port ${PORT}`);
   console.log(`   Security : ACCESS_CODE set: ${!!process.env.ACCESS_CODE}`);
-  console.log(`   Strategy : Jeezy Strategy — 6 Setups`);
-  console.log(`   Sessions : PRE-MARKET | REGULAR | AFTER-HOURS`);
-  console.log(`   Sleep    : 10pm–4am ET (no wasted scans)`);
+  console.log(`   Strategy : Jeezy Strategy — 6 Setups + learned scoring`);
+  console.log(`   Sessions : PRE-MARKET | REGULAR | AFTER-HOURS (all equal)`);
+  console.log(`   Risk     : ${CONFIG.MAX_POSITIONS} max positions | ${(CONFIG.POSITION_PCT*100)}% sizing | ${(CONFIG.CASH_FLOOR_PCT*100)}% cash floor`);
   console.log(`   Broker   : TradeZero API → ${TZ_BASE()}`);
-  console.log(`   Data     : Alpaca + Finnhub`);
-  console.log(`   Scanner  : Yesterday movers + Batch snapshots + Dynamic fallback`);
-  console.log(`   Exit     : +${CONFIG.FIRST_TARGET_PCT}% half | Trail 9EMA | OF exhaust | Bid wall break`);
-  console.log(`   Brain    : Persists via Supabase`);
-  console.log(`   Conviction: ${CONFIG.MIN_CONVICTION}+ (relaxed for more trades)`);
+  console.log(`   Scanner  : AlphaVantage + Alpaca + Finnhub + snapshots (multi-source)`);
+  console.log(`   AI       : Gemini (catalyst) + Groq (verdict)`);
+  console.log(`   Keys     : AV:${!!process.env.ALPHAVANTAGE_KEY} Gemini:${!!process.env.GEMINI_KEY} Groq:${!!process.env.GROQ_API_KEY}`);
+  console.log(`   Exit     : +${CONFIG.FIRST_TARGET_PCT}% half | Trail 9EMA | -${CONFIG.HARD_STOP_PCT}% stop | EOD 7:55pm`);
+  console.log(`   Brain    : Full state persists via Supabase (no more Fresh start resets)`);
   await loadMemory();
-  console.log("🤖 Auto-starting Jeezy Strategy...");
+  console.log("🤖 Auto-starting Jeezy Strategy v14...");
   startAutoTrader();
 });
