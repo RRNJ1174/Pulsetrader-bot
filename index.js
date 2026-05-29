@@ -862,6 +862,9 @@ const managePositions = async (positions,sess) => {
   for(const pos of positions){
     const sym=pos.symbol,pnlPct=parseFloat(pos.unrealized_plpc)*100,cur=parseFloat(pos.current_price);
     const entry=openTrades[sym]; if(!entry) continue;
+    // Skip when market is closed / no live quote — TZ paper returns $0, which would
+    // corrupt peak tracking and could misfire the hard stop. Wait for real prices.
+    if(!cur||cur<=0||!isFinite(pnlPct)){continue;}
     if(!entry.peakPrice||cur>entry.peakPrice) entry.peakPrice=cur;
     const fromPeak=entry.peakPrice>0?((cur-entry.peakPrice)/entry.peakPrice)*100:0;
     const[tech,of]=await Promise.all([getFullTechnicals(sym,cur).catch(()=>null),getOrderFlow(sym,cur).catch(()=>null)]);
@@ -916,6 +919,7 @@ const runEODLiquidation = async (positions,sess) => {
   console.log(`🌙 EOD LIQUIDATION (7:55pm ET) — evaluating ${positions.length} positions`);
   for(const pos of positions){
     const sym=pos.symbol,cur=parseFloat(pos.current_price),pnlPct=parseFloat(pos.unrealized_plpc)*100;
+    if(!cur||cur<=0){console.log(`🌙 ${sym}: no live quote — holding (can't price EOD sell)`);continue;}
     const tech=await getFullTechnicals(sym,cur).catch(()=>null);
     // KEEP overnight only if: green AND above 9EMA AND above VWAP AND uptrend (rising)
     const green=pnlPct>0;
