@@ -1,5 +1,5 @@
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  PULSETRADER v14.3 — JEEZY STRATEGY + TRADEZERO EXECUTION             ║
+// ║  PULSETRADER v14.4 — JEEZY STRATEGY + TRADEZERO EXECUTION             ║
 // ║  Pre-Market | Regular | After-Hours | Sleeps 10pm-4am ET              ║
 // ║  Scanner: AlphaVantage + Finnhub + Alpaca snapshots (multi-source)    ║
 // ║  AI: Gemini (catalyst+verdict) + Groq (fast scoring)                  ║
@@ -8,13 +8,17 @@
 // ║  EOD: 7:55pm ET liquidation (keeps green-momentum overnight holds)    ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
 //
-// v14.3 FIXES:
+// v14.3+v14.4 FIXES:
 //  1. tzGetPositions: use Finnhub for live price (TZ paper returns $0 prices)
 //  2. tzGetPositions: exhaustive qty/symbol field mapping + raw dump on boot
 //  3. managePositions: P&L computed from Finnhub live price, not TZ stale data
 //  4. loadMemory: skip restoring positions with $0 entry (truly unknown cost)
 //  5. /api/debug/positions + /api/debug/account: see raw TZ field names live
 //  6. MAX_POSITIONS hard cap enforced in loadMemory (don't restore 26 ghosts)
+// v14.4 FIXES:
+//  7. tzGetPositions: hardcoded priceAvg/shares/side from confirmed TZ raw dump
+//  8. currentPrice fallback chain: Finnhub→TZ priceClose→TZ priceOpen→prev close
+//  9. Per-position P&L logged every scan cycle (💰 lines in Render logs)
 
 import express from "express";
 import cors    from "cors";
@@ -333,26 +337,24 @@ const tzGetPositions = async () => {
     const list=Array.isArray(d)?d:(d.positions||d.data||d||[]);
     if(!Array.isArray(list)||!list.length) return [];
 
-    // Extract symbol + raw qty — try every known TZ field name variant
+    // ── v14.4: CONFIRMED TZ field names from raw dump ───────────────────────
+    // priceAvg=entry, shares=qty, side="Long"/"Short" string, priceClose=last close
     const rawPositions=list.map(p=>{
-      const sym=(p.symbol||p.ticker||p.Symbol||p.Ticker||"").toString().trim().toUpperCase();
-      const rawQty=parseFloat(
-        p.quantity??p.qty??p.shares??p.Quantity??p.Qty??p.Shares??
-        p.netQuantity??p.netQty??p.NetQuantity??p.NetQty??0
-      );
-      // TZ entry price — try everything; may still be 0 on paper
-      const tzEntry=parseFloat(
-        p.averagePrice??p.avgPrice??p.entryPrice??p.avgEntryPrice??
-        p.AveragePrice??p.AvgPrice??p.EntryPrice??p.AvgEntryPrice??
-        p.costBasis??p.CostBasis??p.avgCost??p.AvgCost??
-        p.openPrice??p.OpenPrice??p.average_price??p.entry_price??0
-      );
-      return {sym,rawQty,tzEntry};
-    }).filter(p=>p.sym&&Math.abs(p.rawQty)>0);
+      const sym=(p.symbol||p.ticker||"").toString().trim().toUpperCase();
+      const qty=Math.abs(parseFloat(p.shares??p.quantity??p.qty??0));
+      // TZ side is a STRING "Long"/"Short", not a signed qty
+      const isLong=(p.side||p.Side||"Long").toString().toLowerCase()!=="short";
+      // priceAvg = confirmed TZ entry price field
+      const tzEntry=parseFloat(p.priceAvg??p.averagePrice??p.avgPrice??p.entryPrice??p.costBasis??0);
+      // priceClose = TZ last close (AH/pre fallback when Finnhub returns 0)
+      const tzClose=parseFloat(p.priceClose??p.closePrice??0);
+      const tzOpen=parseFloat(p.priceOpen??p.openPrice??0);
+      return {sym,qty,isLong,tzEntry,tzClose,tzOpen};
+    }).filter(p=>p.sym&&p.qty>0);
 
     if(!rawPositions.length) return [];
 
-    // Fetch live quotes from Finnhub in parallel (reliable price source)
+    // Fetch live quotes from Finnhub in parallel
     const quotes=await Promise.all(
       rawPositions.map(p=>
         finnhub(`/quote?symbol=${p.sym}`)
@@ -362,30 +364,28 @@ const tzGetPositions = async () => {
     );
     const priceMap=Object.fromEntries(quotes.map(q=>[q.sym,q]));
 
-    return rawPositions.map(({sym,rawQty,tzEntry})=>{
-      const qty=Math.abs(rawQty);
-      const isLong=rawQty>=0;
+    return rawPositions.map(({sym,qty,isLong,tzEntry,tzClose,tzOpen})=>{
       const liveQ=priceMap[sym]||{price:0,prev:0};
-      const currentPrice=liveQ.price>0?liveQ.price:0;
-      // Use TZ entry if valid, else use stored openTrades entry, else prev close
+      // Price priority: Finnhub live → TZ priceClose → TZ priceOpen → Finnhub prev close
+      const currentPrice=liveQ.price>0?liveQ.price:tzClose>0?tzClose:tzOpen>0?tzOpen:liveQ.prev>0?liveQ.prev:0;
+      // Entry priority: TZ priceAvg → openTrades memory → Finnhub prev close
       const entry=tzEntry>0?tzEntry:(openTrades[sym]?.entryPrice>0?openTrades[sym].entryPrice:(liveQ.prev>0?liveQ.prev:0));
       const unrlPl=entry>0&&currentPrice>0?(isLong?(currentPrice-entry)*qty:(entry-currentPrice)*qty):0;
-      const mktVal=qty*currentPrice;
+      console.log(`💰 ${sym}: entry:$${entry.toFixed(4)} live:$${currentPrice.toFixed(4)} P&L:${unrlPl>=0?"+":""}$${unrlPl.toFixed(2)}`);
       return {
         symbol:sym,
         qty:String(qty),
         side:isLong?"long":"short",
         avg_entry_price:String(entry.toFixed(4)),
         current_price:String(currentPrice.toFixed(4)),
-        market_value:String(mktVal.toFixed(2)),
+        market_value:String((qty*currentPrice).toFixed(2)),
         unrealized_pl:String(unrlPl.toFixed(2)),
         unrealized_plpc:String(entry>0&&qty>0?(unrlPl/(qty*entry)):0),
         unrealized_intraday_pl:"0.00",
         unrealized_intraday_plpc:"0",
-        _tz_entry:tzEntry,  // keep original TZ entry for debugging
       };
     });
-  } catch(e){console.log("TZ positions:",e.message);return [];}
+    } catch(e){console.log("TZ positions:",e.message);return [];}
 };
 
 const tzPlaceOrder = async (symbol,action,qty,sess,price=null) => {
@@ -1157,7 +1157,7 @@ app.get("/api/autotrader/status", async(_,res)=>{
   const{sess}=getSession();
   const todayPnL=account?(account.pnl||0):0,equity=account?account.equity:0;
   res.json({
-    active:autoTraderActive,last_scan:lastScanTime,session:sess,broker:"TradeZero",version:"14.3.0",
+    active:autoTraderActive,last_scan:lastScanTime,session:sess,broker:"TradeZero",version:"14.4.0",
     open_positions:positions.length,max_positions:CONFIG.MAX_POSITIONS,slots_left:Math.max(0,CONFIG.MAX_POSITIONS-positions.length),
     equity:account?account.equity.toFixed(2):"—",cash:account?account.cash.toFixed(2):"—",
     cash_floor:account?(account.equity*CONFIG.CASH_FLOOR_PCT).toFixed(2):"—",
@@ -1345,14 +1345,14 @@ app.get("/api/debug/account",async(_,res)=>{
   try{const raw=await tzAPI("GET",`/v1/api/accounts/${TZ_ACC()}/pnl`);res.json({raw,keys:Object.keys(raw||{})});}catch(e){res.status(500).json({error:e.message});}
 });
 
-app.get("/health",(_,res)=>res.json({status:"ok",version:"14.3.0",strategy:"Jeezy Strategy — 6 Setups + learned scoring",broker:"TradeZero",sessions:"PRE + REGULAR + AH",scanner:"AlphaVantage + Alpaca + Finnhub",ai:"Gemini + Groq",auto_trader:autoTraderActive,brain_trades:BRAIN.totalTrades,max_positions:CONFIG.MAX_POSITIONS,session:getSession().sess,ts:new Date().toISOString()}));
+app.get("/health",(_,res)=>res.json({status:"ok",version:"14.4.0",strategy:"Jeezy Strategy — 6 Setups + learned scoring",broker:"TradeZero",sessions:"PRE + REGULAR + AH",scanner:"AlphaVantage + Alpaca + Finnhub",ai:"Gemini + Groq",auto_trader:autoTraderActive,brain_trades:BRAIN.totalTrades,max_positions:CONFIG.MAX_POSITIONS,session:getSession().sess,ts:new Date().toISOString()}));
 
 // ════════════════════════════════════════════════════════════════════════════
 // START
 // ════════════════════════════════════════════════════════════════════════════
 const PORT=process.env.PORT||3001;
 app.listen(PORT, async()=>{
-  console.log(`⚡ PulseTrader v14.3 on port ${PORT}`);
+  console.log(`⚡ PulseTrader v14.4 on port ${PORT}`);
   console.log(`   Strategy : Jeezy Strategy — 6 Setups + learned scoring`);
   console.log(`   Sessions : PRE-MARKET | REGULAR | AFTER-HOURS`);
   console.log(`   Risk     : ${CONFIG.MAX_POSITIONS} max positions | ${(CONFIG.POSITION_PCT*100)}% sizing | ${(CONFIG.CASH_FLOOR_PCT*100)}% cash floor`);
@@ -1361,6 +1361,6 @@ app.listen(PORT, async()=>{
   console.log(`   Keys     : AV:${!!process.env.ALPHAVANTAGE_KEY} Gemini:${!!process.env.GEMINI_KEY} Groq:${!!process.env.GROQ_API_KEY} TZ:${!!process.env.TZ_API_KEY}`);
   console.log(`   Debug    : /api/debug/positions /api/debug/account`);
   await loadMemory();
-  console.log("🤖 Auto-starting Jeezy Strategy v14.3...");
+  console.log("🤖 Auto-starting Jeezy Strategy v14.4...");
   startAutoTrader();
 });
