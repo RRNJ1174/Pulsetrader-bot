@@ -1,5 +1,5 @@
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  PULSETRADER v15.3 — MOMENTUM SCANNER STRATEGY                        ║
+// ║  PULSETRADER v15.4 — MOMENTUM SCANNER STRATEGY                        ║
 // ║  24/7 Operation | 4AM-7:45PM Trading | Study Mode Overnight           ║
 // ║  Scanner: Alpaca(1000 tickers) + Finnhub + AlphaVantage               ║
 // ║  AI: Gemini (catalyst) + Groq (scoring)                               ║
@@ -1222,6 +1222,7 @@ const managePositions = async (positions) => {
             const t={symbol:sym,pnl:pnlDollars,pnlPct,entryPrice,exitPrice:cur,exitReason:"SCORE_DECAY",score:currentScore,stockType:state.stockType,sector:state.sector,entryHour:state.entryHour,float:state.float,relVol:state.relVol,news:state.news,scoreData:state.scoreData};
             await learnFromTrade(t); delete openTrades[sym]; continue;
           }
+          continue; // partial decay sold — skip remaining exit checks this cycle
         }
       }
     }
@@ -1235,7 +1236,7 @@ const managePositions = async (positions) => {
       if(success){
         const t={symbol:sym,pnl:pnlDollars,pnlPct,entryPrice,exitPrice:cur,exitReason:"HARD_STOP",score:currentScore,stockType:state.stockType,sector:state.sector,entryHour:state.entryHour,float:state.float,relVol:state.relVol,news:state.news,scoreData:state.scoreData};
         tradeLog.unshift({...t,type:"STOP",ts:new Date().toISOString()});
-        await learnFromTrade(t); delete openTrades[sym]; continue;
+        await learnFromTrade(t); delete openTrades[sym]; continue; continue;
       }
     }
 
@@ -1378,21 +1379,20 @@ const autoTrade = async () => {
   lastScanTime=new Date().toISOString();
   const{isPre,isOpen,isAH,isStudy,noNewEntries,isOpeningWindow,sess,h,m,t}=getSession();
 
-  // Study mode: run overnight study periodically, then return
-  if(isStudy){
-    console.log(`📚 Study mode [${sess}] — running overnight analysis`);
-    await runOvernightStudy().catch(e=>console.log("Study err:",e.message));
-    return;
-  }
-
   try {
-    // ── ALWAYS: manage held positions first (highest priority) ──
+    // ── ALWAYS: manage held positions first — even during study/overnight ──
     const[positions,account]=await Promise.all([
       tzGetPositions().catch(()=>[]),
       tzGetAccount().catch(()=>null),
     ]);
-
     if(positions.length) await managePositions(positions);
+
+    // Study mode: run overnight study, then return (no new entries)
+    if(isStudy){
+      console.log(`📚 Study mode [${sess}] — running overnight analysis`);
+      await runOvernightStudy().catch(e=>console.log("Study err:",e.message));
+      return;
+    }
 
     // ── EOD sweep at 7:50 PM ──
     if(t>=CONFIG.EOD_SELL_HOUR*100+CONFIG.EOD_SELL_MIN&&t<2000&&positions.length){
@@ -1571,7 +1571,7 @@ const scheduleNextScan = () => {
 const startAutoTrader = () => {
   if(autoTraderActive) return;
   autoTraderActive=true;
-  console.log("🤖 AutoTrader STARTED — Momentum Scanner v15.3");
+  console.log("🤖 AutoTrader STARTED — Momentum Scanner v15.4");
   autoTrade().then(()=>scheduleNextScan());
 };
 const stopAutoTrader = () => {
@@ -1593,7 +1593,7 @@ app.get("/api/autotrader/status", async(_,res)=>{
   const{sess}=getSession();
   const pnl=account?.pnl||0,eq=account?.equity||0;
   res.json({
-    active:autoTraderActive,last_scan:lastScanTime,session:sess,broker:"TradeZero",version:"15.3.0",
+    active:autoTraderActive,last_scan:lastScanTime,session:sess,broker:"TradeZero",version:"15.4.0",
     open_positions:positions.length,max_positions:CONFIG.MAX_POSITIONS,slots_left:Math.max(0,CONFIG.MAX_POSITIONS-positions.length),
     equity:account?account.equity.toFixed(2):"—",cash:account?account.cash.toFixed(2):"—",
     today_pnl:pnl.toFixed(2),today_pnl_pct:eq>0?((pnl/eq)*100).toFixed(2)+"%":"0.00%",
@@ -1724,6 +1724,7 @@ app.get("/api/dashboard",async(req,res)=>{
 // Debug
 app.get("/api/debug/positions",async(_,res)=>{try{const raw=await tzAPI("GET",`/v1/api/accounts/${TZ_ACC()}/positions`);const list=Array.isArray(raw)?raw:(raw.positions||raw.data||[]);res.json({raw_keys:Object.keys(raw||{}),count:list.length,first:list[0]||null,first_keys:list[0]?Object.keys(list[0]):[]});}catch(e){res.status(500).json({error:e.message});}});
 app.get("/api/debug/account",async(_,res)=>{try{const raw=await tzAPI("GET",`/v1/api/accounts/${TZ_ACC()}/pnl`);res.json({raw,keys:Object.keys(raw||{})});}catch(e){res.status(500).json({error:e.message});}});
+app.get("/api/debug/study",(_,res)=>res.json({lastStudy:BRAIN.lastStudy,watchlist:BRAIN.overnightWatchlist,multiDayRunners:BRAIN.multiDayRunners,explosionPatterns:BRAIN.explosionPatterns.length,redFlagPatterns:BRAIN.redFlagPatterns.length,sectorMomentum:BRAIN.sectorMomentum,lastGainersCount:lastGainers.length}));
 app.get("/api/debug/score/:ticker",async(req,res)=>{
   try{
     const ticker=req.params.ticker.toUpperCase();
@@ -1737,14 +1738,14 @@ app.get("/api/sparks",async(req,res)=>{
   try{const{tickers=""}=req.query;const list=tickers.split(",").map(t=>t.trim().toUpperCase()).filter(Boolean).slice(0,20);if(!list.length)return res.json({});const etStart=new Date(getETTime());etStart.setUTCHours(8);const results={};await Promise.all(list.map(async t=>{try{const d=await alpacaData(`/v2/stocks/${t}/bars?timeframe=1Min&start=${etStart.toISOString()}&feed=iex&limit=480`);const bars=d.bars||[];if(!bars.length){results[t]={closes:[],vols:[],pctFromOpen:0};return;}const open=bars[0].o,cur=bars[bars.length-1].c;results[t]={closes:bars.map(b=>b.c),vols:bars.map(b=>b.v||0),open,current:cur,pctFromOpen:open>0?parseFloat(((cur-open)/open*100).toFixed(2)):0};}catch(_){results[t]={closes:[],vols:[],pctFromOpen:0};}}));res.json(results);}catch(e){res.status(500).json({error:e.message});}
 });
 
-app.get("/health",(_,res)=>res.json({status:"ok",version:"15.3.0",strategy:"Momentum Scanner — 1000 tickers | Float-adjusted | 24/7",broker:"TradeZero",auto_trader:autoTraderActive,brain_trades:BRAIN.totalTrades,min_score:BRAIN.minScore,universe:MASTER_UNIVERSE.length,session:getSession().sess,ts:new Date().toISOString()}));
+app.get("/health",(_,res)=>res.json({status:"ok",version:"15.4.0",strategy:"Momentum Scanner — 1000 tickers | Float-adjusted | 24/7",broker:"TradeZero",auto_trader:autoTraderActive,brain_trades:BRAIN.totalTrades,min_score:BRAIN.minScore,universe:MASTER_UNIVERSE.length,session:getSession().sess,ts:new Date().toISOString()}));
 
 // ════════════════════════════════════════════════════════════════════════════
 // START
 // ════════════════════════════════════════════════════════════════════════════
 const PORT=process.env.PORT||3001;
 app.listen(PORT, async()=>{
-  console.log(`⚡ PulseTrader v15.3 on port ${PORT}`);
+  console.log(`⚡ PulseTrader v15.4 on port ${PORT}`);
   console.log(`   Strategy  : Momentum Scanner — pure volume/float/score`);
   console.log(`   Universe  : ${MASTER_UNIVERSE.length} tickers | 10 sectors`);
   console.log(`   Trading   : 4:00 AM - 7:45 PM ET | No entries after 7:45`);
@@ -1756,6 +1757,6 @@ app.listen(PORT, async()=>{
   console.log(`   Rate Limits: Alpaca ${CONFIG.ALPACA_MAX_PER_MIN}/min | Finnhub ${CONFIG.FINNHUB_MAX_PER_MIN}/min | AV ${CONFIG.AV_MAX_PER_DAY}/day`);
   console.log(`   Keys      : AV:${!!process.env.ALPHAVANTAGE_KEY} Gemini:${!!process.env.GEMINI_KEY} Groq:${!!process.env.GROQ_API_KEY} TZ:${!!process.env.TZ_API_KEY}`);
   await loadBrain();
-  console.log("🤖 Starting Momentum Scanner v15.3...");
+  console.log("🤖 Starting Momentum Scanner v15.4...");
   startAutoTrader();
 });
