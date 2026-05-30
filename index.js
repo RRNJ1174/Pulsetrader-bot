@@ -1,5 +1,5 @@
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  PULSETRADER v15.2 — MOMENTUM SCANNER STRATEGY                        ║
+// ║  PULSETRADER v15.3 — MOMENTUM SCANNER STRATEGY                        ║
 // ║  24/7 Operation | 4AM-7:45PM Trading | Study Mode Overnight           ║
 // ║  Scanner: Alpaca(1000 tickers) + Finnhub + AlphaVantage               ║
 // ║  AI: Gemini (catalyst) + Groq (scoring)                               ║
@@ -282,11 +282,13 @@ const tzGetPositions = async () => {
     );
     const priceMap=Object.fromEntries(quotes.map(q=>[q.sym,q]));
 
-    return rawPositions.map(({sym,qty,isLong,tzEntry,tzClose,tzOpen})=>{
+    return rawPositions
+    .filter(p=>p.isLong) // ── v15.2: LONG ONLY — skip any short positions from TZ ──
+    .map(({sym,qty,isLong,tzEntry,tzClose,tzOpen})=>{
       const liveQ=priceMap[sym]||{price:0,prev:0};
       const currentPrice=liveQ.price>0?liveQ.price:tzClose>0?tzClose:tzOpen>0?tzOpen:liveQ.prev>0?liveQ.prev:0;
       const entry=tzEntry>0?tzEntry:(openTrades[sym]?.entryPrice>0?openTrades[sym].entryPrice:(liveQ.prev>0?liveQ.prev:0));
-      const unrlPl=entry>0&&currentPrice>0?(isLong?(currentPrice-entry)*qty:(entry-currentPrice)*qty):0;
+      const unrlPl=entry>0&&currentPrice>0?(currentPrice-entry)*qty:0;
       return {
         symbol:sym, qty:String(qty), side:isLong?"long":"short",
         avg_entry_price:String(entry.toFixed(4)),
@@ -416,8 +418,70 @@ const SECTOR_UNIVERSE = {
   smallcap:  ["ASTC","AMSS","SNGX","NHICW","FGL","UZX","LGHL","RDWU","PLU","CPSH","SEGG","YMAT","QTEX","PRTS","ARTL","HTT","PCLA","EDHL","ATPC","LIMN","ILLR","VIDA","DGNX","JUNS","WHLR","SLXN","GCL","PETZ","BTM","STFS","GMEX","BBCP","GBOX","LMND","JDZG","SNAL","POET","UCAR","HCWB","AUUD","AIIO","RDWU","CPSH","LGHL","NNVC","NCPL","FGL","AMSS","MNTSW","NHICW","LUNL","IPWR","SEGG","PLU","VCIG","QTEX","QTEXW","UZX","PHGE","NCRA","BRAI","CODX","ARTL","OTLK","WHLR","BKSY","ATPC","RDWU"],
 };
 
-// Flat universe of all unique tickers (up to 1000)
-const MASTER_UNIVERSE = [...new Set(Object.values(SECTOR_UNIVERSE).flat())].slice(0,1000);
+// Flat universe of all unique tickers
+// Expanded with top OTC/smallcap momentum runners from Finviz screener
+const EXTRA_UNIVERSE = [
+  // Top volume small caps / OTC runners (updated pool)
+  "HUBC","DEVS","AACPW","STG","REPL","HCWC","PRFX","DLLL","OKTG","OLOX","NAMM","VCIG","VS",
+  "CGTL","SPRC","AEAC","ABOS","ABUS","ACCD","ACET","ACHC","ACLS","ACNB","ACRS","ACST","ACTG",
+  "ADAP","ADCT","ADIL","ADMA","ADMP","ADMS","ADPT","ADRA","ADSE","AEYE","AFMD","AFRI","AGBA",
+  "AGFY","AGIL","AGIO","AGMH","AGRI","AGRO","AGYS","AHCO","AHPI","AIOT","AIRG","AIRO","AIXI",
+  "AKBA","AKTS","AKTX","ALBT","ALCO","ALEC","ALGS","ALIM","ALLK","ALLT","ALNY","ALOT","ALPA",
+  "ALPN","ALRS","ALSA","ALSP","ALTI","ALTO","ALUR","ALVO","ALXO","ALZN","AMAG","AMAO","AMBC",
+  "AMBI","AMBO","AMBP","AMCX","AMED","AMEH","AMES","AMGN","AMHC","AMID","AMIX","AMMO","AMNB",
+  "AMOT","AMOV","AMPE","AMPH","AMPIO","AMPX","AMRN","AMRS","AMSE","AMSF","AMTB","AMTI","AMTX",
+  "AMWD","AMWL","AMZN","ANAB","ANAC","ANAT","ANCN","ANDE","ANGI","ANGL","ANGT","ANIK","ANIP",
+  "ANIX","ANNX","ANPC","ANSS","ANTE","ANTX","ANVS","ANZU","AOGO","AOMR","AORT","AOUT","APCA",
+  "APDN","APEI","APEN","APGN","APLD","APLE","APLS","APLT","APM","APMI","APMO","APOG","APOP",
+  "APRE","APRT","APSI","APVO","APWC","APXI","APYX","AQMS","AQNA","AQNB","AQST","ARAV","ARBB",
+  "ARBE","ARCE","ARCO","ARCT","AREC","ARGX","ARHS","ARIS","ARIZ","ARKG","ARKW","ARMP","AROC",
+  "ARON","ARQT","ARQQ","ARTE","ARTL","ARTNA","ARTS","ARTV","ARWR","ARYA","ARYC","ASBP","ASCA",
+  "ASDN","ASEP","ASLE","ASLN","ASMB","ASND","ASNS","ASPC","ASPI","ASPS","ASRV","ASST","ASTE",
+  "ASUR","ASVN","ASXC","ASYS","ATAI","ATAQ","ATCX","ATEC","ATEX","ATHA","ATHE","ATHX","ATLC",
+  "ATLO","ATMC","ATMV","ATNI","ATNM","ATNY","ATOB","ATRC","ATRE","ATRI","ATRX","ATSG","ATTO",
+  "ATVI","ATXG","ATXI","ATXS","AUBN","AUDC","AUID","AUMN","AUPH","AURC","AURE","AUROW","AUTL",
+  "AUUD","AUVI","AVAH","AVAV","AVCO","AVDL","AVDX","AVEO","AVER","AVGE","AVGO","AVGR","AVHI",
+  "AVID","AVIR","AVNW","AVPT","AVRO","AVTA","AVTE","AVTR","AVXL","AWRE","AXDX","AXGN","AXIL",
+  "AXNX","AXON","AXSM","AXTI","AXTX","AYRO","AYTU","AZEK","AZTA","AZUL","AZYO","BAFN","BAFR",
+  "BANA","BANC","BAND","BANR","BANX","BAOS","BARK","BASE","BASI","BATRA","BCAN","BCDA","BCFL",
+  "BCLI","BCML","BCNX","BCOM","BCRX","BCSA","BCSG","BCST","BCTX","BCYC","BDMD","BDRY","BDSX",
+  "BDTX","BEAT","BEEM","BENF","BETR","BFAC","BFAM","BFIN","BFLY","BFRI","BGCP","BGIO","BGNE",
+  "BGRY","BGSX","BHAT","BHIL","BHLB","BHTG","BIMI","BIOA","BIOC","BIOL","BIOR","BIOS","BIOX",
+  "BIRK","BITE","BIVI","BJDX","BKFC","BKGI","BKKT","BKNG","BKSY","BKTI","BKUV","BLDE","BLDP",
+  "BLFS","BLFY","BLIN","BLKB","BLMN","BLND","BLNK","BLPH","BLRX","BLSA","BLTE","BLTS","BLUE",
+  "BLZE","BMBL","BMEA","BMGN","BMRA","BMRC","BMRN","BNAI","BNIX","BNKL","BNMV","BNOX","BNRG",
+  "BNTC","BNTX","BNXG","BOLT","BOMN","BOOM","BORE","BOXL","BPMC","BPOP","BPRN","BPTH","BPTS",
+  "BPVN","BPYP","BRAC","BRAG","BRBR","BREA","BRFS","BRKH","BRKL","BRLT","BRMK","BRNS","BRRR",
+  "BRTX","BRUN","BRVS","BRWC","BRWS","BSAQ","BSBK","BSET","BSGM","BSIG","BSKL","BSRR","BSST",
+  "BSVN","BTAI","BTBT","BTCM","BTCS","BTDR","BTMD","BTOQ","BTRE","BTTX","BTWA","BTWN","BULD",
+  "BUSE","BVFL","BVNK","BWAY","BWMG","BXRX","BYDE","BYFC","BYND","BYRN","BYSI","BZFD","BZUN",
+  // More active small caps
+  "CACO","CADL","CAKE","CALC","CALT","CALX","CAMG","CAMP","CAMT","CANN","CAPR","CARA","CARB",
+  "CARE","CARG","CARM","CARS","CASA","CASH","CASI","CASS","CATO","CBAN","CBAT","CBFV","CBIO",
+  "CBKM","CBMB","CBPO","CBRN","CBSH","CBST","CBTX","CBYI","CCAI","CCAP","CCCC","CCEC","CCEL",
+  "CCEP","CCIX","CCLP","CCNC","CCOB","CCOI","CCRD","CCRN","CCSI","CCTS","CCXI","CDAK","CDLX",
+  "CDMO","CDNA","CDNS","CDRO","CDTG","CDTX","CDXC","CDXS","CEBI","CECO","CEDA","CELU","CENN",
+  "CENT","CEPU","CERE","CERS","CETX","CEVA","CFFE","CFFI","CFFN","CFIV","CFLT","CFMS","CFNB",
+  "CFRA","CFRX","CGABL","CGBS","CGEN","CGIX","CGNX","CGON","CGRA","CGRN","CGRO","CHCI","CHCO",
+  "CHDN","CHEA","CHEF","CHEK","CHEM","CHGG","CHMG","CHNG","CHNR","CHPM","CHPT","CHRB","CHRD",
+  "CHRO","CHRS","CHRY","CHSN","CHUC","CHWY","CIFR","CLBK","CLBS","CLCN","CLDX","CLEU","CLFD",
+  "CLGN","CLIR","CLMB","CLMT","CLNE","CLNN","CLOA","CLPT","CLRB","CLRC","CLRD","CLRO","CLSD",
+  "CLSH","CLSK","CLSN","CLST","CLTM","CLVR","CLVS","CLWT","CLXT","CMCL","CMCO","CMCT","CMEG",
+  "CMER","CMLS","CMMB","CMND","CMPO","CMPR","CMPS","CMRA","CMRE","CMRX","CMTG","CNBS","CNCE",
+  "CNCR","CNET","CNFN","CNGL","CNHI","CNMD","CNOB","CNSP","CNTB","CNTG","CNTIN","CNTQ","CNTY",
+  "CNXA","CNXC","CNXN","CODA","CODX","COFS","COGT","COHN","COIN","COLS","COMS","COMT","CONG",
+  "CONN","CONX","COPE","COPH","COPI","COPX","CORT","CORZ","COSM","COSS","COST","COVA","COVS",
+  "CPBI","CPHI","CPIX","CPKI","CPOP","CPRT","CPSH","CPTK","CPTN","CPUH","CRAB","CRAI","CRCM",
+  "CRDF","CRDL","CRDO","CREV","CREX","CRGE","CRGO","CRGX","CRGY","CRIS","CRKN","CRLBF","CRMD",
+  "CRNC","CRNT","CRNX","CROX","CRSP","CRSR","CRTD","CRUS","CRVL","CRVS","CRWD","CRXT","CSAI",
+  "CSBB","CSBR","CSCO","CSGS","CSGP","CSII","CSIQ","CSKI","CSLM","CSLT","CSOD","CSSE","CSTL",
+  "CSTR","CSWC","CTAQ","CTBI","CTDD","CTHR","CTLP","CTLT","CTMX","CTNM","CTOS","CTRI","CTRL",
+  "CTSO","CTTB","CTXR","CTXS","CUBE","CUBI","CULD","CULP","CURE","CUTR","CVAC","CVBF","CVCO",
+  "CVGI","CVGW","CVII","CVKD","CVLG","CVLT","CVLY","CVNA","CVNX","CVRS","CVRX","CVTI","CWCO",
+  "CWGL","CWIN","CWNP","CWST","CXAI","CXDO","CXSE","CYAN","CYCC","CYCN","CYDX","CYDY","CYME",
+  "CYRN","CYTO","CZFS","CZNI","DADA","DAIS","DALI","DALN","DALS","DAMO","DANA","DANN","DAOO",
+];
+const MASTER_UNIVERSE = [...new Set([...Object.values(SECTOR_UNIVERSE).flat(),...EXTRA_UNIVERSE])].filter(t=>t&&t.length<=6).slice(0,1000);
 
 // Get sector for a ticker
 const getSector = (ticker) => {
@@ -977,6 +1041,7 @@ const loadBrain = async () => {
           entryPrice,qty:parseFloat(p.qty),peakPrice:parseFloat(p.current_price)||entryPrice,
           halfSold:false,quarterSold:false,scaled:false,score:60,
           stockType:"standard",sector:getSector(p.symbol),entryHour:new Date().getHours(),
+          time:new Date(Date.now()-300000).toISOString(), // 5min ago so decay doesn't immediately fire
           reason:"Restored on startup",restored:true,
         };
         console.log(`📍 Restored: ${p.symbol} x${p.qty} @$${entryPrice} live:$${p.current_price}`);
@@ -993,10 +1058,15 @@ const loadBrain = async () => {
 // OVERNIGHT STUDY MODE
 // ════════════════════════════════════════════════════════════════════════════
 const runOvernightStudy = async () => {
-  // Only run once per night — guard against 2hr timer firing multiple times
+  // Only run once per calendar day ET — guard against 2hr timer firing multiple times
   const studyDate=getETTime().toISOString().split("T")[0];
   if(BRAIN.lastStudy&&BRAIN.lastStudy.startsWith(studyDate)){
-    console.log("🌙 Study already ran today — skipping");return;
+    console.log(`🌙 Study already ran today (${studyDate}) — skipping`);return;
+  }
+  // Skip if no movers to study (e.g. weekend before market opens)
+  if(!lastGainers.length){
+    console.log("🌙 No movers to study yet — skipping (will run after first trading day)");
+    return;
   }
   console.log("🌙 Starting overnight study...");
   try {
@@ -1501,7 +1571,7 @@ const scheduleNextScan = () => {
 const startAutoTrader = () => {
   if(autoTraderActive) return;
   autoTraderActive=true;
-  console.log("🤖 AutoTrader STARTED — Momentum Scanner v15.2");
+  console.log("🤖 AutoTrader STARTED — Momentum Scanner v15.3");
   autoTrade().then(()=>scheduleNextScan());
 };
 const stopAutoTrader = () => {
@@ -1523,7 +1593,7 @@ app.get("/api/autotrader/status", async(_,res)=>{
   const{sess}=getSession();
   const pnl=account?.pnl||0,eq=account?.equity||0;
   res.json({
-    active:autoTraderActive,last_scan:lastScanTime,session:sess,broker:"TradeZero",version:"15.2.0",
+    active:autoTraderActive,last_scan:lastScanTime,session:sess,broker:"TradeZero",version:"15.3.0",
     open_positions:positions.length,max_positions:CONFIG.MAX_POSITIONS,slots_left:Math.max(0,CONFIG.MAX_POSITIONS-positions.length),
     equity:account?account.equity.toFixed(2):"—",cash:account?account.cash.toFixed(2):"—",
     today_pnl:pnl.toFixed(2),today_pnl_pct:eq>0?((pnl/eq)*100).toFixed(2)+"%":"0.00%",
@@ -1667,14 +1737,14 @@ app.get("/api/sparks",async(req,res)=>{
   try{const{tickers=""}=req.query;const list=tickers.split(",").map(t=>t.trim().toUpperCase()).filter(Boolean).slice(0,20);if(!list.length)return res.json({});const etStart=new Date(getETTime());etStart.setUTCHours(8);const results={};await Promise.all(list.map(async t=>{try{const d=await alpacaData(`/v2/stocks/${t}/bars?timeframe=1Min&start=${etStart.toISOString()}&feed=iex&limit=480`);const bars=d.bars||[];if(!bars.length){results[t]={closes:[],vols:[],pctFromOpen:0};return;}const open=bars[0].o,cur=bars[bars.length-1].c;results[t]={closes:bars.map(b=>b.c),vols:bars.map(b=>b.v||0),open,current:cur,pctFromOpen:open>0?parseFloat(((cur-open)/open*100).toFixed(2)):0};}catch(_){results[t]={closes:[],vols:[],pctFromOpen:0};}}));res.json(results);}catch(e){res.status(500).json({error:e.message});}
 });
 
-app.get("/health",(_,res)=>res.json({status:"ok",version:"15.2.0",strategy:"Momentum Scanner — 1000 tickers | Float-adjusted | 24/7",broker:"TradeZero",auto_trader:autoTraderActive,brain_trades:BRAIN.totalTrades,min_score:BRAIN.minScore,universe:MASTER_UNIVERSE.length,session:getSession().sess,ts:new Date().toISOString()}));
+app.get("/health",(_,res)=>res.json({status:"ok",version:"15.3.0",strategy:"Momentum Scanner — 1000 tickers | Float-adjusted | 24/7",broker:"TradeZero",auto_trader:autoTraderActive,brain_trades:BRAIN.totalTrades,min_score:BRAIN.minScore,universe:MASTER_UNIVERSE.length,session:getSession().sess,ts:new Date().toISOString()}));
 
 // ════════════════════════════════════════════════════════════════════════════
 // START
 // ════════════════════════════════════════════════════════════════════════════
 const PORT=process.env.PORT||3001;
 app.listen(PORT, async()=>{
-  console.log(`⚡ PulseTrader v15.2 on port ${PORT}`);
+  console.log(`⚡ PulseTrader v15.3 on port ${PORT}`);
   console.log(`   Strategy  : Momentum Scanner — pure volume/float/score`);
   console.log(`   Universe  : ${MASTER_UNIVERSE.length} tickers | 10 sectors`);
   console.log(`   Trading   : 4:00 AM - 7:45 PM ET | No entries after 7:45`);
@@ -1686,6 +1756,6 @@ app.listen(PORT, async()=>{
   console.log(`   Rate Limits: Alpaca ${CONFIG.ALPACA_MAX_PER_MIN}/min | Finnhub ${CONFIG.FINNHUB_MAX_PER_MIN}/min | AV ${CONFIG.AV_MAX_PER_DAY}/day`);
   console.log(`   Keys      : AV:${!!process.env.ALPHAVANTAGE_KEY} Gemini:${!!process.env.GEMINI_KEY} Groq:${!!process.env.GROQ_API_KEY} TZ:${!!process.env.TZ_API_KEY}`);
   await loadBrain();
-  console.log("🤖 Starting Momentum Scanner v15.2...");
+  console.log("🤖 Starting Momentum Scanner v15.3...");
   startAutoTrader();
 });
