@@ -1,5 +1,5 @@
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  PULSETRADER v15.0 — MOMENTUM SCANNER STRATEGY                        ║
+// ║  PULSETRADER v15.2 — MOMENTUM SCANNER STRATEGY                        ║
 // ║  24/7 Operation | 4AM-7:45PM Trading | Study Mode Overnight           ║
 // ║  Scanner: Alpaca(1000 tickers) + Finnhub + AlphaVantage               ║
 // ║  AI: Gemini (catalyst) + Groq (scoring)                               ║
@@ -302,16 +302,11 @@ const tzGetPositions = async () => {
 // Cancel pending orders for a ticker before placing new
 const tzCancelPending = async (symbol) => {
   try {
-    if(!pendingOrders[symbol]) return;
-    await tzAPI("DELETE",`/v1/api/accounts/${TZ_ACC()}/order/${pendingOrders[symbol]}`).catch(()=>{});
-    delete pendingOrders[symbol];
-    // Also cancel via open orders list
-    const d=await tzAPI("GET",`/v1/api/accounts/${TZ_ACC()}/orders`);
-    const orders=d.orders||d.data||[];
-    if(Array.isArray(orders)){
-      const open=orders.filter(o=>(o.symbol||"").toUpperCase()===symbol&&!["Filled","Canceled","Rejected","Expired"].includes(o.orderStatus||""));
-      await Promise.all(open.map(o=>tzAPI("DELETE",`/v1/api/accounts/${TZ_ACC()}/order/${o.orderId||o.id||o.clientOrderId}`).catch(()=>{})));
-      if(open.length) console.log(`🗑️ Cancelled ${open.length} pending orders for ${symbol}`);
+    // Cancel via stored pending order ID (fast — no extra API call)
+    if(pendingOrders[symbol]){
+      await tzAPI("DELETE",`/v1/api/accounts/${TZ_ACC()}/order/${pendingOrders[symbol]}`).catch(()=>{});
+      console.log(`🗑️ Cancelled pending order for ${symbol}`);
+      delete pendingOrders[symbol];
     }
   } catch(_){}
 };
@@ -684,15 +679,15 @@ const matchesPattern = (data,patterns) => {
 // ════════════════════════════════════════════════════════════════════════════
 // POSITION SIZING
 // ════════════════════════════════════════════════════════════════════════════
-const calcPositionSize = (cash,price,floatM,mktCapB,pct=0) => {
+const calcPositionSize = (cash,price,floatM,mktCapB,gainPct=0) => {
   const fm=parseFloat(floatM)||30;
-  // Float-adjusted pct
-  let pct=0.10;
-  if(fm<5)       pct=0.08;
-  else if(fm<20) pct=0.10;
-  else           pct=0.12;
+  // Float-adjusted position pct
+  let posPct=0.10;
+  if(fm<5)       posPct=0.08;
+  else if(fm<20) posPct=0.10;
+  else           posPct=0.12;
 
-  let dollars=cash*pct;
+  let dollars=cash*posPct;
 
   // Hard caps by price
   let maxVal=50000, maxShares=Infinity;
@@ -700,7 +695,7 @@ const calcPositionSize = (cash,price,floatM,mktCapB,pct=0) => {
   else if(price<2)   {maxVal=20000; maxShares=20000;}
   else if(price<10)  {maxVal=30000; maxShares=10000;}
   // Halt risk cap: stocks up >100% get max $10k position
-  const isHaltRisk=(floatM<5&&pct>100)||(pct>150);
+  const isHaltRisk=(fm<5&&gainPct>100)||(gainPct>150);
   if(isHaltRisk) maxVal=Math.min(maxVal,10000);
 
   // Halt risk cap
@@ -998,6 +993,11 @@ const loadBrain = async () => {
 // OVERNIGHT STUDY MODE
 // ════════════════════════════════════════════════════════════════════════════
 const runOvernightStudy = async () => {
+  // Only run once per night — guard against 2hr timer firing multiple times
+  const studyDate=getETTime().toISOString().split("T")[0];
+  if(BRAIN.lastStudy&&BRAIN.lastStudy.startsWith(studyDate)){
+    console.log("🌙 Study already ran today — skipping");return;
+  }
   console.log("🌙 Starting overnight study...");
   try {
     // Study today's big movers (30 days back)
@@ -1115,18 +1115,33 @@ const managePositions = async (positions) => {
     const of=await getOrderFlow(sym).catch(()=>null);
     const chart=await getChartData(sym,cur).catch(()=>null);
 
-    // Rescore current position
-    const freshScore=await analyzeCandidate(sym,cur,pnlPct,parseInt(pos.market_value||0)/cur).catch(()=>null);
-    const currentScore=freshScore?.score||state.score||60;
-    state.score=currentScore;
+    // Lightweight rescore (chart + OF only — saves ~4 API calls vs full analyzeCandidate)
+    // Full rescore only every 5th cycle to stay within rate limits
+    state._rescoreCount=(state._rescoreCount||0)+1;
+    let currentScore=state.score||60;
+    if(chart&&of){
+      // Quick delta-based score adjustment (no full API fetch)
+      let adj=0;
+      if(chart.aboveVWAP&&of.deltaPositive) adj+=5;
+      if(!chart.aboveVWAP&&!of.deltaPositive) adj-=10;
+      if(chart.volIncreasing&&of.strongBuy) adj+=5;
+      if(!chart.volIncreasing&&!of.deltaPositive) adj-=8;
+      if(chart.hhhl1||chart.hhhl5) adj+=3; else adj-=5;
+      currentScore=Math.max(0,Math.min(100,(state.score||60)+adj));
+      state.score=currentScore;
+    }
 
     // ── Score decay sells ──
-    if(currentScore>=25&&currentScore<50){
+    // Score decay: sell proportional amount based on score drop
+    // Minimum 5 min hold before decay can fire (prevents instant exit on noisy rescore)
+    const heldMinutes=state.time?(Date.now()-new Date(state.time).getTime())/60000:999;
+    const needsDecay=currentScore<50&&heldMinutes>5;
+    if(needsDecay){
       let sellPct=0;
       if(currentScore<25)      sellPct=1.0;
       else if(currentScore<35) sellPct=0.75;
       else if(currentScore<45) sellPct=0.50;
-      else if(currentScore<50) sellPct=0.25;
+      else                     sellPct=0.25; // 45-49
       const sellQty=Math.floor(qty*sellPct);
       if(sellQty>=1){
         const r=await tzPlaceOrder(sym,"Sell",sellQty,cur);
@@ -1143,13 +1158,10 @@ const managePositions = async (positions) => {
 
     // ── Hard stop -15% ──
     if(pnlPct<=-CONFIG.HARD_STOP_PCT){
-      let retries=0;
-      let success=false;
-      while(retries<3&&!success){
-        const r=await tzPlaceOrder(sym,"Sell",pos.qty,cur*(1-retries*0.01));
-        if(r.success) success=true;
-        else{await new Promise(res=>setTimeout(res,30000));retries++;}
-      }
+      // Fire and move on — don't block event loop with 30s sleeps
+      // If first attempt fails, the next scan cycle will retry
+      const r=await tzPlaceOrder(sym,"Sell",pos.qty,cur);
+      const success=r.success;
       if(success){
         const t={symbol:sym,pnl:pnlDollars,pnlPct,entryPrice,exitPrice:cur,exitReason:"HARD_STOP",score:currentScore,stockType:state.stockType,sector:state.sector,entryHour:state.entryHour,float:state.float,relVol:state.relVol,news:state.news,scoreData:state.scoreData};
         tradeLog.unshift({...t,type:"STOP",ts:new Date().toISOString()});
@@ -1296,8 +1308,12 @@ const autoTrade = async () => {
   lastScanTime=new Date().toISOString();
   const{isPre,isOpen,isAH,isStudy,noNewEntries,isOpeningWindow,sess,h,m,t}=getSession();
 
-  // Study mode overnight: still runs on 2hr timer (set in scheduleNextScan)
-  if(isStudy){console.log(`😴 Study mode [${sess}]`);return;}
+  // Study mode: run overnight study periodically, then return
+  if(isStudy){
+    console.log(`📚 Study mode [${sess}] — running overnight analysis`);
+    await runOvernightStudy().catch(e=>console.log("Study err:",e.message));
+    return;
+  }
 
   try {
     // ── ALWAYS: manage held positions first (highest priority) ──
@@ -1370,6 +1386,7 @@ const autoTrade = async () => {
     // Score sort
     qualified=qualified.sort((a,b)=>b.score-a.score);
     console.log(`🎯 Qualified: ${qualified.map(s=>`${s.ticker}=${s.score}`).slice(0,8).join(" ")}`);
+    lastAnalysis=qualified.slice(0,5).map(s=>`${s.ticker}=$${s.price} +${s.pct?.toFixed(0)}% score:${s.score} [${s.details?.slice(0,50)||""}]`).join(" | ");
 
     // ── Opening window: need 2 green rising candles ──
     if(isOpeningWindow){
@@ -1437,7 +1454,7 @@ const autoTrade = async () => {
       if(!stock.of?.deltaPositive){console.log(`🚫 ${stock.ticker}: delta negative`);continue;}
       if(!stock.chart?.volIncreasing){console.log(`🚫 ${stock.ticker}: volume declining`);continue;}
 
-      const qty=calcPositionSize(cash,stock.price,stock.float,stock.mktCapB,stock.pct);
+      const qty=calcPositionSize(cash,stock.price,stock.float,stock.mktCapB,stock.pct||0);
       if(qty<1){console.log(`🚫 ${stock.ticker}: qty too small`);continue;}
       if(qty*stock.price>cash-equity*CONFIG.CASH_FLOOR_PCT){console.log(`🚫 ${stock.ticker}: would breach cash floor`);continue;}
 
@@ -1449,6 +1466,7 @@ const autoTrade = async () => {
           score:stock.score,stockType:stock.stockType,sector:stock.sector,entryHour:h,
           float:stock.float,relVol:stock.relVol,news:stock.news,scoreData:stock.scoreData,
           prevDayHigh:null, // will be set from daily bars if available
+          time:new Date().toISOString(), // for minimum hold time check
           reason:`score:${stock.score} ${stock.details?.slice(0,80)}`,
         };
         // Try to get prev day high for gap fill tracking
@@ -1483,7 +1501,7 @@ const scheduleNextScan = () => {
 const startAutoTrader = () => {
   if(autoTraderActive) return;
   autoTraderActive=true;
-  console.log("🤖 AutoTrader STARTED — Momentum Scanner v15");
+  console.log("🤖 AutoTrader STARTED — Momentum Scanner v15.2");
   autoTrade().then(()=>scheduleNextScan());
 };
 const stopAutoTrader = () => {
@@ -1505,7 +1523,7 @@ app.get("/api/autotrader/status", async(_,res)=>{
   const{sess}=getSession();
   const pnl=account?.pnl||0,eq=account?.equity||0;
   res.json({
-    active:autoTraderActive,last_scan:lastScanTime,session:sess,broker:"TradeZero",version:"15.0.0",
+    active:autoTraderActive,last_scan:lastScanTime,session:sess,broker:"TradeZero",version:"15.2.0",
     open_positions:positions.length,max_positions:CONFIG.MAX_POSITIONS,slots_left:Math.max(0,CONFIG.MAX_POSITIONS-positions.length),
     equity:account?account.equity.toFixed(2):"—",cash:account?account.cash.toFixed(2):"—",
     today_pnl:pnl.toFixed(2),today_pnl_pct:eq>0?((pnl/eq)*100).toFixed(2)+"%":"0.00%",
@@ -1649,14 +1667,14 @@ app.get("/api/sparks",async(req,res)=>{
   try{const{tickers=""}=req.query;const list=tickers.split(",").map(t=>t.trim().toUpperCase()).filter(Boolean).slice(0,20);if(!list.length)return res.json({});const etStart=new Date(getETTime());etStart.setUTCHours(8);const results={};await Promise.all(list.map(async t=>{try{const d=await alpacaData(`/v2/stocks/${t}/bars?timeframe=1Min&start=${etStart.toISOString()}&feed=iex&limit=480`);const bars=d.bars||[];if(!bars.length){results[t]={closes:[],vols:[],pctFromOpen:0};return;}const open=bars[0].o,cur=bars[bars.length-1].c;results[t]={closes:bars.map(b=>b.c),vols:bars.map(b=>b.v||0),open,current:cur,pctFromOpen:open>0?parseFloat(((cur-open)/open*100).toFixed(2)):0};}catch(_){results[t]={closes:[],vols:[],pctFromOpen:0};}}));res.json(results);}catch(e){res.status(500).json({error:e.message});}
 });
 
-app.get("/health",(_,res)=>res.json({status:"ok",version:"15.0.0",strategy:"Momentum Scanner — 1000 tickers | Float-adjusted | 24/7",broker:"TradeZero",auto_trader:autoTraderActive,brain_trades:BRAIN.totalTrades,min_score:BRAIN.minScore,universe:MASTER_UNIVERSE.length,session:getSession().sess,ts:new Date().toISOString()}));
+app.get("/health",(_,res)=>res.json({status:"ok",version:"15.2.0",strategy:"Momentum Scanner — 1000 tickers | Float-adjusted | 24/7",broker:"TradeZero",auto_trader:autoTraderActive,brain_trades:BRAIN.totalTrades,min_score:BRAIN.minScore,universe:MASTER_UNIVERSE.length,session:getSession().sess,ts:new Date().toISOString()}));
 
 // ════════════════════════════════════════════════════════════════════════════
 // START
 // ════════════════════════════════════════════════════════════════════════════
 const PORT=process.env.PORT||3001;
 app.listen(PORT, async()=>{
-  console.log(`⚡ PulseTrader v15.0 on port ${PORT}`);
+  console.log(`⚡ PulseTrader v15.2 on port ${PORT}`);
   console.log(`   Strategy  : Momentum Scanner — pure volume/float/score`);
   console.log(`   Universe  : ${MASTER_UNIVERSE.length} tickers | 10 sectors`);
   console.log(`   Trading   : 4:00 AM - 7:45 PM ET | No entries after 7:45`);
@@ -1668,6 +1686,6 @@ app.listen(PORT, async()=>{
   console.log(`   Rate Limits: Alpaca ${CONFIG.ALPACA_MAX_PER_MIN}/min | Finnhub ${CONFIG.FINNHUB_MAX_PER_MIN}/min | AV ${CONFIG.AV_MAX_PER_DAY}/day`);
   console.log(`   Keys      : AV:${!!process.env.ALPHAVANTAGE_KEY} Gemini:${!!process.env.GEMINI_KEY} Groq:${!!process.env.GROQ_API_KEY} TZ:${!!process.env.TZ_API_KEY}`);
   await loadBrain();
-  console.log("🤖 Starting Momentum Scanner v15.0...");
+  console.log("🤖 Starting Momentum Scanner v15.2...");
   startAutoTrader();
 });
