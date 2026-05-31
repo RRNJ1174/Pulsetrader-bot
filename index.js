@@ -1,5 +1,5 @@
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  PULSETRADER v15.4 — MOMENTUM SCANNER STRATEGY                        ║
+// ║  PULSETRADER v15.7 — MOMENTUM SCANNER STRATEGY                        ║
 // ║  24/7 Operation | 4AM-7:45PM Trading | Study Mode Overnight           ║
 // ║  Scanner: Alpaca(1000 tickers) + Finnhub + AlphaVantage               ║
 // ║  AI: Gemini (catalyst) + Groq (scoring)                               ║
@@ -263,7 +263,10 @@ const tzGetPositions = async () => {
     const rawPositions=list.map(p=>{
       const sym=(p.symbol||p.ticker||"").toString().trim().toUpperCase();
       const qty=Math.abs(parseFloat(p.shares??p.quantity??p.qty??0));
-      const isLong=(p.side||p.Side||"Long").toString().toLowerCase()!=="short";
+      // Use shares sign to determine direction (TZ paper side field is unreliable)
+      // Negative shares = actual short position, positive = long
+      const rawShares=parseFloat(p.shares??p.quantity??p.qty??0);
+      const isLong=rawShares>=0; // positive or zero shares = long
       const tzEntry=parseFloat(p.priceAvg??p.averagePrice??p.avgPrice??p.entryPrice??p.costBasis??0);
       const tzClose=parseFloat(p.priceClose??p.closePrice??0);
       const tzOpen=parseFloat(p.priceOpen??p.openPrice??0);
@@ -283,7 +286,8 @@ const tzGetPositions = async () => {
     const priceMap=Object.fromEntries(quotes.map(q=>[q.sym,q]));
 
     return rawPositions
-    .filter(p=>p.isLong) // ── v15.2: LONG ONLY — skip any short positions from TZ ──
+    // Return ALL positions (longs + shorts) so UI matches TZ exactly
+    // Management logic only applies to longs (openTrades only tracks longs)
     .map(({sym,qty,isLong,tzEntry,tzClose,tzOpen})=>{
       const liveQ=priceMap[sym]||{price:0,prev:0};
       const currentPrice=liveQ.price>0?liveQ.price:tzClose>0?tzClose:tzOpen>0?tzOpen:liveQ.prev>0?liveQ.prev:0;
@@ -295,7 +299,7 @@ const tzGetPositions = async () => {
         current_price:String(currentPrice.toFixed(4)),
         market_value:String((qty*currentPrice).toFixed(2)),
         unrealized_pl:String(unrlPl.toFixed(2)),
-        unrealized_plpc:String(entry>0&&qty>0?(unrlPl/(qty*entry)):0),
+        unrealized_plpc:String((entry>0&&qty>0&&isFinite(unrlPl/(qty*entry)))?((unrlPl/(qty*entry))*100).toFixed(2):0),
       };
     });
   } catch(e){console.log("TZ positions:",e.message);return [];}
@@ -1168,6 +1172,7 @@ const managePositions = async (positions) => {
 
   for(const pos of positions){
     const sym=pos.symbol;
+
     const cur=parseFloat(pos.current_price);
     const state=openTrades[sym];
     if(!state) continue;
@@ -1236,7 +1241,7 @@ const managePositions = async (positions) => {
       if(success){
         const t={symbol:sym,pnl:pnlDollars,pnlPct,entryPrice,exitPrice:cur,exitReason:"HARD_STOP",score:currentScore,stockType:state.stockType,sector:state.sector,entryHour:state.entryHour,float:state.float,relVol:state.relVol,news:state.news,scoreData:state.scoreData};
         tradeLog.unshift({...t,type:"STOP",ts:new Date().toISOString()});
-        await learnFromTrade(t); delete openTrades[sym]; continue; continue;
+        await learnFromTrade(t); delete openTrades[sym]; continue;
       }
     }
 
@@ -1571,7 +1576,7 @@ const scheduleNextScan = () => {
 const startAutoTrader = () => {
   if(autoTraderActive) return;
   autoTraderActive=true;
-  console.log("🤖 AutoTrader STARTED — Momentum Scanner v15.4");
+  console.log("🤖 AutoTrader STARTED — Momentum Scanner v15.7");
   autoTrade().then(()=>scheduleNextScan());
 };
 const stopAutoTrader = () => {
@@ -1593,7 +1598,7 @@ app.get("/api/autotrader/status", async(_,res)=>{
   const{sess}=getSession();
   const pnl=account?.pnl||0,eq=account?.equity||0;
   res.json({
-    active:autoTraderActive,last_scan:lastScanTime,session:sess,broker:"TradeZero",version:"15.4.0",
+    active:autoTraderActive,last_scan:lastScanTime,session:sess,broker:"TradeZero",version:"15.7.0",
     open_positions:positions.length,max_positions:CONFIG.MAX_POSITIONS,slots_left:Math.max(0,CONFIG.MAX_POSITIONS-positions.length),
     equity:account?account.equity.toFixed(2):"—",cash:account?account.cash.toFixed(2):"—",
     today_pnl:pnl.toFixed(2),today_pnl_pct:eq>0?((pnl/eq)*100).toFixed(2)+"%":"0.00%",
@@ -1604,6 +1609,7 @@ app.get("/api/autotrader/status", async(_,res)=>{
     held_positions:Object.entries(openTrades).map(([sym,s])=>({symbol:sym,entry:s.entryPrice,peak:s.peakPrice,score:s.score,type:s.stockType,halfSold:s.halfSold})),
   });
 });
+
 
 app.post("/api/autotrader/sellall",async(_,res)=>{try{const n=await tzSellAll();res.json({message:`Sold ${n} positions`});}catch(e){res.status(500).json({error:e.message});}});
 app.get("/api/alerts",(_,res)=>res.json({alerts:[]}));
@@ -1666,9 +1672,11 @@ app.get("/api/holdings",async(_,res)=>{
       const unrlPnl=entry>0?(cur-entry)*qty:0;
       const unrlPct=entry>0?((cur-entry)/entry)*100:0;
       const s=openTrades[p.symbol];
-      return {symbol:p.symbol,qty,side:p.side,avg_entry:entry.toFixed(4),current_price:cur.toFixed(4),market_value:(qty*cur).toFixed(2),unrealized_pnl:unrlPnl.toFixed(2),unrealized_pnl_pct:unrlPct.toFixed(2)+"%",score:s?.score||"?",stock_type:s?.stockType||"?",sector:s?.sector||"?",half_sold:s?.halfSold||false,quarter_sold:s?.quarterSold||false,scaled:s?.scaled||false,peak:s?.peakPrice?.toFixed(4)||"?",first_target:(entry*(1+CONFIG.FIRST_TARGET_PCT/100)).toFixed(4),hard_stop:(entry*(1-CONFIG.HARD_STOP_PCT/100)).toFixed(4)};
+      const safeUnrlPct=isNaN(unrlPct)?0:unrlPct;
+      return {symbol:p.symbol,qty,side:p.side,avg_entry:entry.toFixed(4),current_price:cur.toFixed(4),market_value:(qty*cur).toFixed(2),unrealized_pnl:unrlPnl.toFixed(2),unrealized_pnl_pct:safeUnrlPct.toFixed(2)+"%",score:s?.score||"?",stock_type:s?.stockType||"?",sector:s?.sector||"?",half_sold:s?.halfSold||false,quarter_sold:s?.quarterSold||false,scaled:s?.scaled||false,peak:s?.peakPrice?.toFixed(4)||"?",first_target:(entry*(1+CONFIG.FIRST_TARGET_PCT/100)).toFixed(4),hard_stop:(entry*(1-CONFIG.HARD_STOP_PCT/100)).toFixed(4)};
     });
-    res.json({holdings,total_value:holdings.reduce((s,h)=>s+parseFloat(h.market_value),0).toFixed(2),total_pnl:holdings.reduce((s,h)=>s+parseFloat(h.unrealized_pnl),0).toFixed(2),count:holdings.length});
+    const acc=await tzGetAccount().catch(()=>null);
+    res.json({holdings,total_value:holdings.reduce((s,h)=>s+parseFloat(h.market_value),0).toFixed(2),total_pnl:holdings.reduce((s,h)=>s+parseFloat(h.unrealized_pnl),0).toFixed(2),total_pnl_today:acc?(acc.pnl||0).toFixed(2):"0.00",count:holdings.length,broker:"TradeZero"});
   }catch(e){res.status(500).json({error:e.message});}
 });
 
@@ -1738,14 +1746,14 @@ app.get("/api/sparks",async(req,res)=>{
   try{const{tickers=""}=req.query;const list=tickers.split(",").map(t=>t.trim().toUpperCase()).filter(Boolean).slice(0,20);if(!list.length)return res.json({});const etStart=new Date(getETTime());etStart.setUTCHours(8);const results={};await Promise.all(list.map(async t=>{try{const d=await alpacaData(`/v2/stocks/${t}/bars?timeframe=1Min&start=${etStart.toISOString()}&feed=iex&limit=480`);const bars=d.bars||[];if(!bars.length){results[t]={closes:[],vols:[],pctFromOpen:0};return;}const open=bars[0].o,cur=bars[bars.length-1].c;results[t]={closes:bars.map(b=>b.c),vols:bars.map(b=>b.v||0),open,current:cur,pctFromOpen:open>0?parseFloat(((cur-open)/open*100).toFixed(2)):0};}catch(_){results[t]={closes:[],vols:[],pctFromOpen:0};}}));res.json(results);}catch(e){res.status(500).json({error:e.message});}
 });
 
-app.get("/health",(_,res)=>res.json({status:"ok",version:"15.4.0",strategy:"Momentum Scanner — 1000 tickers | Float-adjusted | 24/7",broker:"TradeZero",auto_trader:autoTraderActive,brain_trades:BRAIN.totalTrades,min_score:BRAIN.minScore,universe:MASTER_UNIVERSE.length,session:getSession().sess,ts:new Date().toISOString()}));
+app.get("/health",(_,res)=>res.json({status:"ok",version:"15.7.0",strategy:"Momentum Scanner — 1000 tickers | Float-adjusted | 24/7",broker:"TradeZero",auto_trader:autoTraderActive,brain_trades:BRAIN.totalTrades,min_score:BRAIN.minScore,universe:MASTER_UNIVERSE.length,session:getSession().sess,ts:new Date().toISOString()}));
 
 // ════════════════════════════════════════════════════════════════════════════
 // START
 // ════════════════════════════════════════════════════════════════════════════
 const PORT=process.env.PORT||3001;
 app.listen(PORT, async()=>{
-  console.log(`⚡ PulseTrader v15.4 on port ${PORT}`);
+  console.log(`⚡ PulseTrader v15.7 on port ${PORT}`);
   console.log(`   Strategy  : Momentum Scanner — pure volume/float/score`);
   console.log(`   Universe  : ${MASTER_UNIVERSE.length} tickers | 10 sectors`);
   console.log(`   Trading   : 4:00 AM - 7:45 PM ET | No entries after 7:45`);
@@ -1757,6 +1765,6 @@ app.listen(PORT, async()=>{
   console.log(`   Rate Limits: Alpaca ${CONFIG.ALPACA_MAX_PER_MIN}/min | Finnhub ${CONFIG.FINNHUB_MAX_PER_MIN}/min | AV ${CONFIG.AV_MAX_PER_DAY}/day`);
   console.log(`   Keys      : AV:${!!process.env.ALPHAVANTAGE_KEY} Gemini:${!!process.env.GEMINI_KEY} Groq:${!!process.env.GROQ_API_KEY} TZ:${!!process.env.TZ_API_KEY}`);
   await loadBrain();
-  console.log("🤖 Starting Momentum Scanner v15.4...");
+  console.log("🤖 Starting Momentum Scanner v15.7...");
   startAutoTrader();
 });
