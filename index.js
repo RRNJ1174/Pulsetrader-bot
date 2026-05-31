@@ -1772,6 +1772,7 @@ app.post("/api/chat", async(req,res)=>{
         }
         if(myPos){
           const entry=parseFloat(myPos.avg_entry_price),qty=parseFloat(myPos.qty);
+          
           const pnlPct=entry>0?((price-entry)/entry*100):0;
           reply+=`\n📦 Your position: ${qty}sh @$${entry.toFixed(2)} | ${pnlPct>=0?"+":""}${pnlPct.toFixed(1)}%\n`;
           reply+=`Hard stop: $${(entry*0.85).toFixed(2)} | First target: $${(entry*1.5).toFixed(2)}`;
@@ -1883,4 +1884,57 @@ app.delete("/api/trade/:id",async(req,res)=>{try{await supabase(`pulsetrader_tra
 
 app.get("/api/news",async(req,res)=>{
   const{ticker}=req.query;
-  try{const tod
+  try{const today=new Date().toISOString().split("T")[0],week=new Date(Date.now()-7*86400000).toISOString().split("T")[0];const news=ticker?await finnhub(`/company-news?symbol=${ticker.toUpperCase()}&from=${week}&to=${today}`):await finnhub("/news?category=general");res.json((Array.isArray(news)?news:[]).slice(0,20).map(n=>({headline:n.headline,source:n.source,url:n.url,datetime:n.datetime})));}catch(e){res.status(500).json({error:e.message});}
+});
+
+app.get("/api/autotrader/brain",(_,res)=>res.json({...BRAIN,master_universe_size:MASTER_UNIVERSE.length}));
+app.get("/api/autotrader/gainers",(_,res)=>res.json({gainers:lastGainers,ts:lastScanTime}));
+app.get("/api/orders",async(req,res)=>{try{const d=await tzAPI("GET",`/v1/api/accounts/${TZ_ACC()}/orders`);res.json(Array.isArray(d.orders||d.data||d)?d.orders||d.data||d:[]);}catch(e){res.status(500).json({error:e.message});}});
+
+app.get("/api/dashboard",async(req,res)=>{
+  try{
+    const[account,positions,trades]=await Promise.all([tzGetAccount().catch(()=>null),tzGetPositions().catch(()=>[]),supabase("pulsetrader_trades?order=created_at.desc&limit=100").catch(()=>[])]);
+    const t=Array.isArray(trades)?trades:[],closed=t.filter(x=>x.pnl!=null),total=closed.reduce((s,x)=>s+parseFloat(x.pnl||0),0),winners=closed.filter(x=>parseFloat(x.pnl)>0).length;
+    res.json({account:account?{equity:account.equity.toFixed(2),cash:account.cash.toFixed(2),pnl_today:account.pnl.toFixed(2)}:null,auto_trader:{active:autoTraderActive,session:getSession().sess,last_scan:lastScanTime,brain_score:BRAIN.minScore},brain:{win_rate:BRAIN.totalTrades>0?((BRAIN.wins/BRAIN.totalTrades)*100).toFixed(1)+"%":"0%",total_trades:BRAIN.totalTrades,total_pnl:(BRAIN.totalPnL||0).toFixed(2),lessons:BRAIN.lessons.slice(0,3),watchlist:BRAIN.overnightWatchlist.slice(0,5).map(w=>w.ticker)},holdings:positions.map(p=>({symbol:p.symbol,qty:parseFloat(p.qty),current_price:parseFloat(p.current_price).toFixed(4),unrealized_pnl:parseFloat(p.unrealized_pl).toFixed(2),score:openTrades[p.symbol]?.score||"?"})),trade_summary:{total_pnl:total.toFixed(2),win_rate:closed.length?((winners/closed.length)*100).toFixed(1)+"%":"0%",total_trades:t.length}});
+  }catch(e){res.status(500).json({error:e.message});}
+});
+
+// Debug
+app.get("/api/debug/positions",async(_,res)=>{try{const raw=await tzAPI("GET",`/v1/api/accounts/${TZ_ACC()}/positions`);const list=Array.isArray(raw)?raw:(raw.positions||raw.data||[]);res.json({raw_keys:Object.keys(raw||{}),count:list.length,first:list[0]||null,first_keys:list[0]?Object.keys(list[0]):[]});}catch(e){res.status(500).json({error:e.message});}});
+app.get("/api/debug/account",async(_,res)=>{try{const raw=await tzAPI("GET",`/v1/api/accounts/${TZ_ACC()}/pnl`);res.json({raw,keys:Object.keys(raw||{})});}catch(e){res.status(500).json({error:e.message});}});
+app.get("/api/debug/study",(_,res)=>res.json({lastStudy:BRAIN.lastStudy,watchlist:BRAIN.overnightWatchlist,multiDayRunners:BRAIN.multiDayRunners,explosionPatterns:BRAIN.explosionPatterns.length,redFlagPatterns:BRAIN.redFlagPatterns.length,sectorMomentum:BRAIN.sectorMomentum,lastGainersCount:lastGainers.length}));
+app.get("/api/debug/score/:ticker",async(req,res)=>{
+  try{
+    const ticker=req.params.ticker.toUpperCase();
+    const q=await finnhub(`/quote?symbol=${ticker}`);
+    const result=await analyzeCandidate(ticker,q.c,q.dp,q.v);
+    res.json(result);
+  }catch(e){res.status(500).json({error:e.message});}
+});
+
+app.get("/api/sparks",async(req,res)=>{
+  try{const{tickers=""}=req.query;const list=tickers.split(",").map(t=>t.trim().toUpperCase()).filter(Boolean).slice(0,20);if(!list.length)return res.json({});const etStart=new Date(getETTime());etStart.setUTCHours(8);const results={};await Promise.all(list.map(async t=>{try{const d=await alpacaData(`/v2/stocks/${t}/bars?timeframe=1Min&start=${etStart.toISOString()}&feed=iex&limit=480`);const bars=d.bars||[];if(!bars.length){results[t]={closes:[],vols:[],pctFromOpen:0};return;}const open=bars[0].o,cur=bars[bars.length-1].c;results[t]={closes:bars.map(b=>b.c),vols:bars.map(b=>b.v||0),open,current:cur,pctFromOpen:open>0?parseFloat(((cur-open)/open*100).toFixed(2)):0};}catch(_){results[t]={closes:[],vols:[],pctFromOpen:0};}}));res.json(results);}catch(e){res.status(500).json({error:e.message});}
+});
+
+app.get("/health",(_,res)=>res.json({status:"ok",version:"15.9.0",strategy:"Momentum Scanner — 1000 tickers | Float-adjusted | 24/7",broker:"TradeZero",auto_trader:autoTraderActive,brain_trades:BRAIN.totalTrades,min_score:BRAIN.minScore,universe:MASTER_UNIVERSE.length,session:getSession().sess,ts:new Date().toISOString()}));
+
+// ════════════════════════════════════════════════════════════════════════════
+// START
+// ════════════════════════════════════════════════════════════════════════════
+const PORT=process.env.PORT||3001;
+app.listen(PORT, async()=>{
+  console.log(`⚡ PulseTrader v15.9 on port ${PORT}`);
+  console.log(`   Strategy  : Momentum Scanner — pure volume/float/score`);
+  console.log(`   Universe  : ${MASTER_UNIVERSE.length} tickers | 10 sectors`);
+  console.log(`   Trading   : 4:00 AM - 7:45 PM ET | No entries after 7:45`);
+  console.log(`   EOD Sweep : 7:50 PM ET`);
+  console.log(`   Study Mode: 7:50 PM - 3:59 AM ET (every 2hr)`);
+  console.log(`   Targets   : +50% sell 50% | +100% sell 25% | Trail -15%`);
+  console.log(`   Sizing    : Float-adjusted (8%/10%/12%) + hard caps`);
+  console.log(`   Orders    : All marketable limit (buy@ask sell@bid)`);
+  console.log(`   Rate Limits: Alpaca ${CONFIG.ALPACA_MAX_PER_MIN}/min | Finnhub ${CONFIG.FINNHUB_MAX_PER_MIN}/min | AV ${CONFIG.AV_MAX_PER_DAY}/day`);
+  console.log(`   Keys      : AV:${!!process.env.ALPHAVANTAGE_KEY} Gemini:${!!process.env.GEMINI_KEY} Groq:${!!process.env.GROQ_API_KEY} TZ:${!!process.env.TZ_API_KEY}`);
+  await loadBrain();
+  console.log("🤖 Starting Momentum Scanner v15.9...");
+  startAutoTrader();
+});
