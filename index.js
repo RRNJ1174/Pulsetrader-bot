@@ -204,9 +204,13 @@ const finnhub = async (path) => {
   const r=await fetch(`https://finnhub.io/api/v1${path}${sep}token=${process.env.FINNHUB_KEY}`);
   return r.json();
 };
-const groq = async (prompt, maxTokens=800) => {
+const groq = async (promptOrMessages, maxTokens=800) => {
   try {
-    const r=await fetch("https://api.groq.com/openai/v1/chat/completions",{method:"POST",headers:{Authorization:`Bearer ${process.env.GROQ_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:"llama-3.1-8b-instant",max_tokens:maxTokens,messages:[{role:"system",content:"You are PulseTrader, an elite momentum trading AI. Analyze small-cap momentum stocks. Be concise and decisive."},{role:"user",content:prompt}]})});
+    // Accept either a plain string OR a messages array (for chat with memory)
+    const isChat=Array.isArray(promptOrMessages);
+    const model=isChat?"llama-3.3-70b-versatile":"llama-3.1-8b-instant";
+    const messages=isChat?promptOrMessages:[{role:"system",content:"You are PulseTrader, an elite momentum trading AI. Analyze small-cap momentum stocks. Be concise and decisive."},{role:"user",content:promptOrMessages}];
+    const r=await fetch("https://api.groq.com/openai/v1/chat/completions",{method:"POST",headers:{Authorization:`Bearer ${process.env.GROQ_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model,max_tokens:maxTokens,messages})});
     const d=await r.json(); if(d.error) throw new Error(d.error.message);
     return d.choices?.[0]?.message?.content||"";
   } catch(e){return "";}
@@ -1622,195 +1626,216 @@ app.post("/api/chat", async(req,res)=>{
   const{messages}=req.body; if(!messages?.length) return res.status(400).json({error:"No messages"});
   try{
     const userMsg=messages[messages.length-1]?.content||"";
-    const u=userMsg.toLowerCase();
 
-    // ── SELL commands ──────────────────────────────────────────────────────
-    // "sell MNTS", "close MNTS", "exit MNTS", "sell all", "close everything"
-    const sellAll=u.match(/\b(sell all|close all|exit all|close everything|sell everything|dump everything|liquidate)\b/);
-    if(sellAll){
-      const n=await tzSellAll();
-      Object.keys(openTrades).forEach(s=>delete openTrades[s]);
-      return res.json({reply:`🔴 SELL ALL executed — ${n} positions closed.`});
-    }
-    const sellMatch=u.match(/\b(sell|close|exit|dump|get out of)\s+([a-z]{1,6})\b/);
-    if(sellMatch){
-      const sym=sellMatch[2].toUpperCase();
-      const pos=await tzGetPositions().catch(()=>[]);
-      const p=pos.find(x=>x.symbol===sym);
-      if(!p) return res.json({reply:`❌ No position found in ${sym}.`});
-      const cur=parseFloat(p.current_price);
-      const r=await tzPlaceOrder(sym,"Sell",p.qty,cur);
-      if(r.success){
-        const entry=openTrades[sym]?.entryPrice||parseFloat(p.avg_entry_price);
-        const pnlPct=entry>0?((cur-entry)/entry*100).toFixed(1):"?";
-        delete openTrades[sym];
-        return res.json({reply:`✅ Sell order sent: ${sym} x${p.qty} @$${cur.toFixed(2)} | P&L: ${pnlPct}%`});
-      }
-      return res.json({reply:`❌ Order failed for ${sym}: ${r.orderStatus||r.error}`});
-    }
+    // Store in memory
+    chatMemory.push({role:"user",content:userMsg,ts:Date.now()});
+    if(chatMemory.length>60) chatMemory.splice(0,2);
 
-    // ── BUY commands ───────────────────────────────────────────────────────
-    // "buy AAPL", "buy 100 AAPL", "buy AAPL 100 shares"
-    const buyMatch=u.match(/\bbuy\s+(\d+)?\s*([a-z]{1,6})(?:\s+(\d+))?\b/);
-    if(buyMatch){
-      const sym=(buyMatch[2]||"").toUpperCase();
-      const qty=parseInt(buyMatch[1]||buyMatch[3]||0);
-      if(!sym) return res.json({reply:"❌ What ticker? e.g. 'buy 100 AAPL'"});
-      const q=await finnhub(`/quote?symbol=${sym}`).catch(()=>null);
-      const price=q?.c||0;
-      if(!price) return res.json({reply:`❌ Can't get price for ${sym}.`});
-      const buyQty=qty>0?qty:calcPositionSize(627000,price,30,1,0);
-      if(buyQty<1) return res.json({reply:`❌ Qty too small for ${sym} @$${price}.`});
-      const r=await tzPlaceOrder(sym,"Buy",buyQty,price);
-      if(r.success){
-        openTrades[sym]={entryPrice:price,qty:buyQty,peakPrice:price,halfSold:false,quarterSold:false,scaled:false,score:60,stockType:"manual",sector:getSector(sym),entryHour:getSession().h,time:new Date().toISOString(),reason:"Manual chat order"};
-        return res.json({reply:`✅ Buy order sent: ${sym} x${buyQty} @$${price.toFixed(2)}`});
-      }
-      return res.json({reply:`❌ Order failed for ${sym}: ${r.orderStatus||r.error}`});
-    }
-
-    // ── BOT CONTROL ────────────────────────────────────────────────────────
-    if(u.match(/\b(stop bot|pause bot|stop trading|pause trading)\b/)){
-      stopAutoTrader();
-      return res.json({reply:"⏹️ Bot paused. No new scans or entries. Existing positions still managed on next manual scan."});
-    }
-    if(u.match(/\b(start bot|resume bot|start trading|resume trading|run bot)\b/)){
-      startAutoTrader();
-      return res.json({reply:"🟢 Bot started. Scanning now."});
-    }
-
-    // ── INFO queries ───────────────────────────────────────────────────────
-    if(u.match(/\b(movers?|gainers?|top stocks?|what.?s moving|spikes?)\b/)){
-      const top=lastGainers.slice(0,8);
-      if(top.length) return res.json({reply:`🔥 TOP MOVERS:\n\n${top.map((g,i)=>`${i+1}. ${g.ticker} +${(g.pct||0).toFixed(1)}% @ $${g.price}`).join("\n")}\n\nLast scan: ${lastScanTime?new Date(lastScanTime).toISOString().slice(11,16):"pending"}`});
-      return res.json({reply:`🔍 No movers yet. Bot: ${autoTraderActive?"🟢 RUNNING":"🔴 PAUSED"} | ${getSession().sess}`});
-    }
-    if(u.match(/\b(status|equity|bot running|how.?s the bot)\b/)){
-      const[acc,pos]=await Promise.all([tzGetAccount().catch(()=>null),tzGetPositions().catch(()=>[])]);
-      if(acc) return res.json({reply:`📊 STATUS\n${autoTraderActive?"🟢 RUNNING":"🔴 PAUSED"} | ${getSession().sess}\nEquity: $${acc.equity.toFixed(2)} | Cash: $${acc.cash.toFixed(2)}\nP&L today: ${acc.pnl>=0?"+":""}$${acc.pnl.toFixed(2)}\nPositions: ${pos.length}/${CONFIG.MAX_POSITIONS}\nBrain: ${BRAIN.totalTrades}T | ${BRAIN.totalTrades>0?((BRAIN.wins/BRAIN.totalTrades)*100).toFixed(0):0}% WR | minScore:${BRAIN.minScore}`});
-    }
-    if(u.match(/\b(holdings?|positions?|what do i (own|have)|my stocks?)\b/)){
-      const pos=await tzGetPositions().catch(()=>[]);
-      if(!pos.length) return res.json({reply:"📊 No open positions."});
-      const lines=pos.map(p=>{
-        const entry=parseFloat(p.avg_entry_price),cur=parseFloat(p.current_price),qty=parseFloat(p.qty);
-        const pnlPct=entry>0?((cur-entry)/entry*100):0;
-        const pnlDollar=(cur-entry)*qty;
-        const flag=pnlPct<=-14?"🚨":pnlPct<=-10?"⚠️":pnlPct>=50?"🎯":pnlPct>=20?"✅":"";
-        return `${flag}${p.symbol}: ${qty}sh @$${entry.toFixed(2)} → $${cur.toFixed(2)} | ${pnlPct>=0?"+":""}${pnlPct.toFixed(1)}% ($${pnlDollar>=0?"+":""}${pnlDollar.toFixed(0)})`;
-      });
-      return res.json({reply:`📊 POSITIONS (${pos.length})\n\n${lines.join("\n")}`});
-    }
-    if(u.match(/\b(watchlist|tonight|tomorrow|overnight)\b/)){
-      if(BRAIN.overnightWatchlist.length) return res.json({reply:`🌙 OVERNIGHT WATCHLIST\n\n${BRAIN.overnightWatchlist.slice(0,10).map((w,i)=>`${i+1}. ${w.ticker} $${w.price?.toFixed(2)||"?"} | float:${w.float}M | catalyst:${w.hasCatalyst?"✅":"❌"}`).join("\n")}`});
-      return res.json({reply:"🌙 Watchlist not built yet — runs at EOD sweep."});
-    }
-    // Specific ticker query: "how's MNTS", "what about CYRX", "check LGHL"
-    const tickerQuery=u.match(/\b(how.?s|what about|check|price of|tell me about)\s+([a-z]{1,6})\b/);
-    if(tickerQuery){
-      const sym=tickerQuery[2].toUpperCase();
-      const[q,pos]=await Promise.all([finnhub(`/quote?symbol=${sym}`).catch(()=>null),tzGetPositions().catch(()=>[])]);
-      const p=pos.find(x=>x.symbol===sym);
-      const price=q?.c||0;
-      const pct=q?.dp||0;
-      let reply=`${sym}: $${price.toFixed(2)} (${pct>=0?"+":""}${pct.toFixed(1)}% today)`;
-      if(p){
-        const entry=parseFloat(p.avg_entry_price),qty=parseFloat(p.qty);
-        const pnlPct=entry>0?((price-entry)/entry*100):0;
-        const pnlDollar=(price-entry)*qty;
-        const stop=(entry*0.85).toFixed(2);
-        reply+=`\n\nYour position: ${qty}sh @$${entry.toFixed(2)}\nP&L: ${pnlPct>=0?"+":""}${pnlPct.toFixed(1)}% ($${pnlDollar>=0?"+":""}${pnlDollar.toFixed(0)})\nHard stop: $${stop}${pnlPct<=-14?"  🚨 NEAR STOP":""}\nScore: ${openTrades[sym]?.score||"?"}`;
-      }
-      return res.json({reply});
-    }
-
-    // ── Deep analyze ticker: "analyze MNTS", "chart CYRX", "score LGHL" ────
-    const analyzeCmd=u.match(/\b(analyze|analysis|chart|score|deep dive|dd|look at|research)\s+([a-z]{1,6})\b/);
-    if(analyzeCmd){
-      const sym=analyzeCmd[2].toUpperCase();
-      try{
-        const[q,prof,newsR,chart,of]=await Promise.all([
-          finnhub(`/quote?symbol=${sym}`),
-          finnhub(`/stock/profile2?symbol=${sym}`),
-          finnhub(`/company-news?symbol=${sym}&from=${new Date(Date.now()-7*86400000).toISOString().split("T")[0]}&to=${new Date().toISOString().split("T")[0]}`),
-          getChartData(sym,0).catch(()=>null),
-          getOrderFlow(sym).catch(()=>null),
-        ]);
-        const price=q.c||0,pct=q.dp||0;
-        const float=prof?.shareOutstanding;
-        const newsItems=Array.isArray(newsR)?newsR:[];
-        const topNews=newsItems[0]?.headline||"none";
-        const ageH=newsItems[0]?((Date.now()-newsItems[0].datetime*1000)/3600000).toFixed(0):"?";
-        const pos=await tzGetPositions().catch(()=>[]);
-        const myPos=pos.find(p=>p.symbol===sym);
-
-        // Full score
-        const scoreResult=await analyzeCandidate(sym,price,pct,q.v||0).catch(()=>null);
-
-        let reply=`📊 ANALYSIS: ${sym}\n`;
-        reply+=`Price: $${price.toFixed(2)} (${pct>=0?"+":""}${pct.toFixed(1)}% today)\n`;
-        reply+=`Float: ${float?float.toFixed(1)+"M":"unknown"} | MktCap: $${prof?.marketCapitalization?(prof.marketCapitalization/1000).toFixed(0)+"M":"?"}\n`;
-        reply+=`\n📰 News: ${topNews} (${ageH}h ago)\n`;
-        if(chart){
-          reply+=`\n📈 Chart:\n`;
-          reply+=`• VWAP: $${chart.vwap?.toFixed(2)||"?"} — ${price>=chart.vwap?"✅ above":"❌ below"}\n`;
-          reply+=`• HH+HL 1min: ${chart.hhhl1?"✅":"❌"} | 5min: ${chart.hhhl5?"✅":"❌"}\n`;
-          reply+=`• Volume: ${chart.volIncreasing?"📈 increasing":"📉 declining"}\n`;
-          reply+=`• Consolidation breakout: ${chart.consolidation?"✅ YES":"❌ no"}\n`;
-        }
-        if(of){
-          reply+=`\n💹 Order Flow:\n`;
-          reply+=`• Buy%: ${of.buyPct}% | Delta: ${of.delta>0?"+":""}${of.delta}\n`;
-          reply+=`• Spread: ${of.spread}% | Bid wall: ${parseFloat(of.bidAskRatio)>1.5?"✅":"❌"}\n`;
-          reply+=`• Tape speed: ${of.tapeSpeed} trades/min\n`;
-        }
-        if(scoreResult){
-          reply+=`\n🎯 Bot Score: ${scoreResult.score}/100\n`;
-          reply+=`Factors: ${scoreResult.details?.slice(0,120)||"?"}\n`;
-          const threshold=getSession().isPre?CONFIG.PRE_MIN_SCORE:Math.max(CONFIG.MIN_SCORE,BRAIN.minScore);
-          reply+=`Entry threshold: ${threshold} — ${scoreResult.score>=threshold?"✅ QUALIFIES":"❌ below threshold"}\n`;
-        }
-        if(myPos){
-          const entry=parseFloat(myPos.avg_entry_price),qty=parseFloat(myPos.qty);
-          
-          const pnlPct=entry>0?((price-entry)/entry*100):0;
-          reply+=`\n📦 Your position: ${qty}sh @$${entry.toFixed(2)} | ${pnlPct>=0?"+":""}${pnlPct.toFixed(1)}%\n`;
-          reply+=`Hard stop: $${(entry*0.85).toFixed(2)} | First target: $${(entry*1.5).toFixed(2)}`;
-        }
-        // Store in memory
-        chatMemory.push({role:"user",content:userMsg,ts:Date.now()});
-        chatMemory.push({role:"assistant",content:reply,ts:Date.now()});
-        if(chatMemory.length>60) chatMemory.splice(0,chatMemory.length-60);
-        return res.json({reply});
-      }catch(e){return res.json({reply:`❌ Error analyzing ${sym}: ${e.message}`});}
-    }
-
-    // ── Fallback: Groq with full context + chat memory ─────────────────────
+    // ── Get live context ──────────────────────────────────────────────────
     const[acc,pos]=await Promise.all([tzGetAccount().catch(()=>null),tzGetPositions().catch(()=>[])]);
     const posStr=pos.map(p=>{
       const entry=parseFloat(p.avg_entry_price),cur=parseFloat(p.current_price),qty=parseFloat(p.qty);
       const pnlPct=entry>0?((cur-entry)/entry*100).toFixed(1):"?";
       return `${p.symbol}:${qty}sh@$${entry.toFixed(2)}→$${cur.toFixed(2)}(${pnlPct}%)`;
     }).join(", ");
-    const ctx=`[Bot:${autoTraderActive?"RUNNING":"PAUSED"}|${getSession().sess}|Equity:$${acc?.equity?.toFixed(0)||"?"}|Cash:$${acc?.cash?.toFixed(0)||"?"}|P&L:$${acc?.pnl?.toFixed(0)||"?"}|${BRAIN.totalTrades}T|${BRAIN.totalTrades>0?((BRAIN.wins/BRAIN.totalTrades)*100).toFixed(0):0}%WR|minScore:${BRAIN.minScore}|Positions:${posStr||"none"}|TopMovers:${lastGainers.slice(0,3).map(g=>`${g.ticker}+${(g.pct||0).toFixed(0)}%`).join(",")}|Lessons:${BRAIN.lessons.slice(0,2).join(" / ")||"none"}]`;
+    const ctx=`Bot:${autoTraderActive?"RUNNING":"PAUSED"}|${getSession().sess}|Equity:$${acc?.equity?.toFixed(0)||"?"}|Cash:$${acc?.cash?.toFixed(0)||"?"}|PnL:$${acc?.pnl?.toFixed(0)||"?"}|${BRAIN.totalTrades}T|${BRAIN.totalTrades>0?((BRAIN.wins/BRAIN.totalTrades)*100).toFixed(0):0}%WR|minScore:${BRAIN.minScore}|Positions:[${posStr||"none"}]|TopMovers:${lastGainers.slice(0,5).map(g=>`${g.ticker}+${(g.pct||0).toFixed(0)}%@$${g.price}`).join(",")||"none"}|Lessons:${BRAIN.lessons.slice(0,2).join(" / ")||"none"}`;
 
-    // Store user message in memory
-    chatMemory.push({role:"user",content:userMsg,ts:Date.now()});
-    if(chatMemory.length>60) chatMemory.splice(0,2);
-
-    // Build conversation with memory (last 10 exchanges = 20 messages)
+    // ── Send to Groq to understand intent ─────────────────────────────────
     const recentMemory=chatMemory.slice(-20).map(m=>({role:m.role,content:m.content}));
-    const systemPrompt="You are PulseTrader, an elite momentum trading AI managing a live paper trading account. You have real-time position/account data and remember this conversation. Be direct and concise. For trade execution tell the user exact commands: 'sell TICKER', 'buy TICKER', 'sell all'. For analysis suggest 'analyze TICKER'. You can discuss strategy, explain positions, and give entry/exit advice based on live data.";
-    // Inject context into last user message
-    const groqMessages=[
+    const systemPrompt=`You are PulseTrader — an elite momentum trading AI and the user's personal trading partner. You have live access to their TradeZero paper trading account and can execute real trades right now.
+
+LIVE ACCOUNT CONTEXT (real-time):
+${ctx}
+
+YOUR PERSONALITY:
+- Sharp prop trader at a desk — direct, decisive, zero fluff
+- Use trader language: float, catalyst, rip, flush, gap, tape, HOD, VWAP, float rotation
+- Remember this entire conversation and the user's trading style
+- User style: low float momentum, fresh catalysts, scale out into strength, cut losers fast
+
+YOUR CAPABILITIES (you can execute these right now):
+- Sell or buy any stock in their TradeZero account
+- Full ticker analysis: chart, order flow, score, news, P&L
+- Show all positions with live P&L and risk flags
+- Show top movers from last scan
+- Start or stop the bot scanner
+- Sell everything at once
+
+TRADEZERO POSITION DATA:
+- avg_entry_price = cost basis | current_price = live Finnhub price
+- qty = shares held | side = long or short
+- P&L for longs = (current - entry) * qty
+- Hard stop = -15% from entry | First target = +50% from entry
+- Positions shown as: SYMBOL:QTYsh@$ENTRY→$CURRENT(PNL%)
+
+INTENT DETECTION — add EXECUTE_ command on its own line at the very end when user clearly wants action:
+- Sell a stock: "get me out of X" / "sell X" / "close X" / "dump X" → EXECUTE_SELL:SYMBOL
+- Buy a stock: "buy X" / "get into X" / "grab some X" → EXECUTE_BUY:SYMBOL:QTY(optional)
+- Sell everything: "sell all" / "close everything" / "get flat" / "nuke it" → EXECUTE_SELLALL
+- Analyze ticker: "analyze X" / "what's X doing" / "check X" / "dd X" → EXECUTE_ANALYZE:SYMBOL
+- Show positions: "what do I have" / "my positions" / "show holdings" → EXECUTE_POSITIONS
+- Show movers: "what's moving" / "top movers" / "what's hot" → EXECUTE_MOVERS
+- Account status: "status" / "how's the bot" / "equity" / "how am I doing" → EXECUTE_STATUS
+- Stop bot: "stop" / "pause the bot" / "stop trading" → EXECUTE_STOPBOT
+- Start bot: "start" / "resume" / "kick it on" → EXECUTE_STARTBOT
+
+RULES:
+- Only add EXECUTE_ when action is clearly intended
+- Conversation, strategy talk, market questions = respond naturally, NO EXECUTE_
+- EXECUTE_ must be the very last line, nothing after it
+- Never trigger trades on vague questions
+
+You are watching the same screen as the user. Be their edge.\`;const groqMessages=[
       {role:"system",content:systemPrompt},
       ...recentMemory.slice(0,-1),
-      {role:"user",content:userMsg+"\n\n[LIVE CONTEXT: "+ctx+"]"}
+      {role:"user",content:userMsg}
     ];
-    const reply=await groq(groqMessages.map(m=>m.role==="system"?m.content:m.content).join("\n"),700);
-    // Store assistant reply in memory
-    if(reply){chatMemory.push({role:"assistant",content:reply,ts:Date.now()});}
-    res.json({reply:reply||"Sorry, AI unavailable."});
+
+    const aiReply=await groq(groqMessages,900);
+    if(!aiReply) return res.json({reply:"Sorry, AI unavailable right now."});
+
+    // ── Parse intent from Groq response ──────────────────────────────────
+    const lines=aiReply.split("\n");
+    const execLine=lines.find(l=>l.trim().startsWith("EXECUTE_"));
+    const displayReply=lines.filter(l=>!l.trim().startsWith("EXECUTE_")).join("\n").trim();
+
+    let actionResult="";
+
+    if(execLine){
+      const cmd=execLine.trim();
+
+      // SELL specific stock
+      if(cmd.startsWith("EXECUTE_SELL:")){
+        const sym=cmd.split(":")[1]?.trim().toUpperCase();
+        if(sym){
+          const p=pos.find(x=>x.symbol===sym);
+          if(p){
+            const cur=parseFloat(p.current_price);
+            const r=await tzPlaceOrder(sym,"Sell",p.qty,cur);
+            if(r.success){
+              const entry=openTrades[sym]?.entryPrice||parseFloat(p.avg_entry_price);
+              const pnlPct=entry>0?((cur-entry)/entry*100).toFixed(1):"?";
+              delete openTrades[sym];
+              actionResult=`\n\n✅ Done — sold ${sym} x${p.qty} @$${cur.toFixed(2)} | P&L: ${pnlPct}%`;
+            } else {
+              actionResult=`\n\n❌ Order failed: ${r.orderStatus||r.error}`;
+            }
+          } else {
+            actionResult=`\n\n❌ No position in ${sym}`;
+          }
+        }
+      }
+
+      // SELL ALL
+      else if(cmd.startsWith("EXECUTE_SELLALL")){
+        const n=await tzSellAll();
+        Object.keys(openTrades).forEach(s=>delete openTrades[s]);
+        actionResult=`\n\n🔴 Sold all ${n} positions.`;
+      }
+
+      // BUY
+      else if(cmd.startsWith("EXECUTE_BUY:")){
+        const parts=cmd.split(":");
+        const sym=(parts[1]||"").trim().toUpperCase();
+        const qty=parseInt(parts[2]||0);
+        if(sym){
+          const q=await finnhub(`/quote?symbol=${sym}`).catch(()=>null);
+          const price=q?.c||0;
+          if(price){
+            const buyQty=qty>0?qty:calcPositionSize(acc?.cash||100000,price,30,1,0);
+            const r=await tzPlaceOrder(sym,"Buy",buyQty,price);
+            if(r.success){
+              openTrades[sym]={entryPrice:price,qty:buyQty,peakPrice:price,halfSold:false,quarterSold:false,scaled:false,score:60,stockType:"manual",sector:getSector(sym),entryHour:getSession().h,time:new Date().toISOString(),reason:"Chat order"};
+              actionResult=`\n\n✅ Bought ${sym} x${buyQty} @$${price.toFixed(2)}`;
+            } else {
+              actionResult=`\n\n❌ Order failed: ${r.orderStatus||r.error}`;
+            }
+          } else {
+            actionResult=`\n\n❌ Can't get price for ${sym}`;
+          }
+        }
+      }
+
+      // ANALYZE
+      else if(cmd.startsWith("EXECUTE_ANALYZE:")){
+        const sym=cmd.split(":")[1]?.trim().toUpperCase();
+        if(sym){
+          try{
+            const[q,prof,newsR,chart,of]=await Promise.all([
+              finnhub(`/quote?symbol=${sym}`),
+              finnhub(`/stock/profile2?symbol=${sym}`),
+              finnhub(`/company-news?symbol=${sym}&from=${new Date(Date.now()-7*86400000).toISOString().split("T")[0]}&to=${new Date().toISOString().split("T")[0]}`),
+              getChartData(sym,0).catch(()=>null),
+              getOrderFlow(sym).catch(()=>null),
+            ]);
+            const price=q.c||0,pct=q.dp||0;
+            const float=prof?.shareOutstanding;
+            const newsItems=Array.isArray(newsR)?newsR:[];
+            const topNews=newsItems[0]?.headline||"none";
+            const ageH=newsItems[0]?((Date.now()-newsItems[0].datetime*1000)/3600000).toFixed(0):"?";
+            const scoreResult=await analyzeCandidate(sym,price,pct,q.v||0).catch(()=>null);
+            const myPos=pos.find(p=>p.symbol===sym);
+            let analysis=`\n\n📊 ${sym} LIVE DATA:\n`;
+            analysis+=`$${price.toFixed(2)} (${pct>=0?"+":""}${pct.toFixed(1)}%) | Float: ${float?float.toFixed(1)+"M":"?"} \n`;
+            analysis+=`News: ${topNews.slice(0,80)} (${ageH}h ago)\n`;
+            if(chart) analysis+=`VWAP: $${chart.vwap?.toFixed(2)} ${price>=chart.vwap?"✅above":"❌below"} | Vol: ${chart.volIncreasing?"📈":"📉"} | HH+HL: ${(chart.hhhl1||chart.hhhl5)?"✅":"❌"}\n`;
+            if(of) analysis+=`Buy%: ${of.buyPct}% | Delta: ${of.delta>0?"+":""}${of.delta} | Spread: ${of.spread}%\n`;
+            if(scoreResult) analysis+=`Bot Score: ${scoreResult.score}/100 ${scoreResult.score>=BRAIN.minScore?"✅ QUALIFIES":"❌ below threshold"}\n`;
+            if(myPos){
+              const entry=parseFloat(myPos.avg_entry_price),qty=parseFloat(myPos.qty);
+              const pnlPct=entry>0?((price-entry)/entry*100):0;
+              analysis+=`Your position: ${qty}sh @$${entry.toFixed(2)} | ${pnlPct>=0?"+":""}${pnlPct.toFixed(1)}% | Stop: $${(entry*0.85).toFixed(2)}`;
+            }
+            actionResult=analysis;
+          }catch(e){actionResult=`\n\n❌ Analysis error: ${e.message}`;}
+        }
+      }
+
+      // POSITIONS
+      else if(cmd.startsWith("EXECUTE_POSITIONS")){
+        if(!pos.length){actionResult="\n\n📊 No open positions.";}
+        else{
+          const lines=pos.map(p=>{
+            const entry=parseFloat(p.avg_entry_price),cur=parseFloat(p.current_price),qty=parseFloat(p.qty);
+            const pnlPct=entry>0?((cur-entry)/entry*100):0;
+            const pnlDollar=(cur-entry)*qty;
+            
+            const flag=pnlPct<=-14?"🚨":pnlPct<=-10?"⚠️":pnlPct>=50?"🎯":pnlPct>=20?"✅":"";
+            return `${flag}${p.symbol}: ${qty}sh @$${entry.toFixed(2)}→$${cur.toFixed(2)} ${pnlPct>=0?"+":""}${pnlPct.toFixed(1)}% ($${pnlDollar>=0?"+":""}${pnlDollar.toFixed(0)})`;
+          });
+          actionResult=`\n\n📊 POSITIONS (${pos.length}):\n${lines.join("\n")}`;
+        }
+      }
+
+      // MOVERS
+      else if(cmd.startsWith("EXECUTE_MOVERS")){
+        const top=lastGainers.slice(0,8);
+        if(top.length) actionResult=`\n\n🔥 TOP MOVERS:\n${top.map((g,i)=>`${i+1}. ${g.ticker} +${(g.pct||0).toFixed(1)}% @$${g.price}`).join("\n")}`;
+        else actionResult="\n\n🔍 No movers scanned yet.";
+      }
+
+      // STATUS
+      else if(cmd.startsWith("EXECUTE_STATUS")){
+        if(acc) actionResult=`\n\n📊 ${autoTraderActive?"🟢 RUNNING":"🔴 PAUSED"} | ${getSession().sess}\nEquity: $${acc.equity.toFixed(2)} | Cash: $${acc.cash.toFixed(2)}\nP&L: ${acc.pnl>=0?"+":""}$${acc.pnl.toFixed(2)}\nPositions: ${pos.length}/${CONFIG.MAX_POSITIONS} | WR: ${BRAIN.totalTrades>0?((BRAIN.wins/BRAIN.totalTrades)*100).toFixed(0):0}%`;
+      }
+
+      // STOP BOT
+      else if(cmd.startsWith("EXECUTE_STOPBOT")){
+        stopAutoTrader();
+        actionResult="\n\n⏹️ Bot paused.";
+      }
+
+      // START BOT
+      else if(cmd.startsWith("EXECUTE_STARTBOT")){
+        startAutoTrader();
+        actionResult="\n\n🟢 Bot started.";
+      }
+    }
+
+    const finalReply=(displayReply+actionResult).trim();
+    chatMemory.push({role:"assistant",content:finalReply,ts:Date.now()});
+    res.json({reply:finalReply});
+
   }catch(e){res.status(500).json({error:e.message});}
 });
 
