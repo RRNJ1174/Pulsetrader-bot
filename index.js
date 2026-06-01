@@ -1685,7 +1685,7 @@ RULES:
 - EXECUTE_ must be the very last line, nothing after it
 - Never trigger trades on vague questions
 
-You are watching the same screen as the user. Be their edge.\`;
+You are watching the same screen as the user. Be their edge.`;
 
     const groqMessages=[
       {role:"system",content:systemPrompt},
