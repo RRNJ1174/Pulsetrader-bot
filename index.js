@@ -269,10 +269,15 @@ const tzGetPositions = async () => {
     const rawPositions=list.map(p=>{
       const sym=(p.symbol||p.ticker||"").toString().trim().toUpperCase();
       const qty=Math.abs(parseFloat(p.shares??p.quantity??p.qty??0));
-      // Use shares sign to determine direction (TZ paper side field is unreliable)
-      // Negative shares = actual short position, positive = long
+      // TZ paper API quirk: returns NEGATIVE shares for long positions and side="Short"
+      // The actual side field is also unreliable in paper mode
+      // Best approach: treat ALL positions as long unless explicitly identified as short
+      // (bot only enters long positions, paper account shouldn't have real shorts)
       const rawShares=parseFloat(p.shares??p.quantity??p.qty??0);
-      const isLong=rawShares>=0; // positive or zero shares = long
+      const sideField=(p.side||"").toLowerCase();
+      // If TZ explicitly says "Sell" it's a short; otherwise treat as long
+      // Note: TZ paper often returns "Short" even for long positions due to sign convention
+      const isLong=sideField!=="sell"; // only "Sell" side = actual short
       const tzEntry=parseFloat(p.priceAvg??p.averagePrice??p.avgPrice??p.entryPrice??p.costBasis??0);
       const tzClose=parseFloat(p.priceClose??p.closePrice??0);
       const tzOpen=parseFloat(p.priceOpen??p.openPrice??0);
@@ -1801,7 +1806,6 @@ You are watching the same screen as the user. Be their edge.`;
             const entry=parseFloat(p.avg_entry_price),cur=parseFloat(p.current_price),qty=parseFloat(p.qty);
             const pnlPct=entry>0?((cur-entry)/entry*100):0;
             const pnlDollar=(cur-entry)*qty;
-            
             const flag=pnlPct<=-14?"🚨":pnlPct<=-10?"⚠️":pnlPct>=50?"🎯":pnlPct>=20?"✅":"";
             return `${flag}${p.symbol}: ${qty}sh @$${entry.toFixed(2)}→$${cur.toFixed(2)} ${pnlPct>=0?"+":""}${pnlPct.toFixed(1)}% ($${pnlDollar>=0?"+":""}${pnlDollar.toFixed(0)})`;
           });
