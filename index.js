@@ -231,18 +231,19 @@ const tzOrder = async (symbol,side,qty,price) => {
   // TZ paper order sides:
   // "Buy"       = open long position
   // "Sell"      = close long position  
-  // "SellShort" = open short position
-  // "BuyCover"  = close short position
-  // We ONLY use Buy and Sell — no shorting
+  // We ONLY use Buy and Sell — no shorting ever
   const tzSide = side==="Buy" ? "Buy" : "Sell";
-  const lp=tzSide==="Buy"?parseFloat((price*1.002).toFixed(4)):parseFloat((price*0.998).toFixed(4));
+  // Use Market orders for sells (stops/exits) so they actually fill
+  // Use Limit for buys to avoid overpaying
+  const isBuy = tzSide==="Buy";
+  const lp=isBuy?parseFloat((price*1.002).toFixed(4)):parseFloat((price*0.998).toFixed(4));
   const body={
     clientOrderId:`PT-${Date.now()}-${Math.random().toString(36).slice(2,6).toUpperCase()}`,
     symbol:symbol.toUpperCase(),securityType:"Stock",
-    side:tzSide,orderType:"Limit",
+    side:tzSide,orderType:isBuy?"Limit":"Market",
     limitPrice:lp,price:lp,traderAction:tzSide,
     quantity:Math.floor(qty),orderQuantity:Math.floor(qty),
-    timeInForce:"Day",route:process.env.TZ_ROUTE||"SMART",
+    timeInForce:"Day",route:"TRAFIX_SIM",
   };
   try {
     const d=await tzAPI("POST",`/v1/api/accounts/${ACC()}/order`,body);
@@ -776,8 +777,16 @@ const startup = async () => {
     if(shorts.length) console.log(`⚠️ Found ${shorts.length} SHORT positions in TZ: ${shorts.map(p=>p.sym).join(",")} — bot will NOT manage these`);
     for(const p of longs){
       if(!openTrades[p.sym]&&p.entry>0){
-        openTrades[p.sym]={entry:p.entry,qty:p.qty,peak:p.entry,halfSold:false,quarterSold:false,time:Date.now(),hour:new Date().getHours()};
-        console.log(`📍 Restored LONG: ${p.sym} x${p.qty} @$${p.entry}`);
+        // Don't restore if position is already past hard stop — it's a problem position
+        const q=await finnhub(`/quote?symbol=${p.sym}`).catch(()=>null);
+        const cur=parseFloat(q?.c||0);
+        const pnlPct=cur>0?((cur-p.entry)/p.entry)*100:0;
+        if(cur>0&&pnlPct<=-CONFIG.HARD_STOP_PCT){
+          console.log(`⚠️ NOT restoring ${p.sym} — already at ${pnlPct.toFixed(1)}% (past hard stop). Skipping.`);
+          continue;
+        }
+        openTrades[p.sym]={entry:p.entry,qty:p.qty,peak:cur||p.entry,halfSold:false,quarterSold:false,time:Date.now(),hour:new Date().getHours()};
+        console.log(`📍 Restored LONG: ${p.sym} x${p.qty} @$${p.entry} | now $${cur.toFixed(2)} (${pnlPct>=0?"+":""}${pnlPct.toFixed(1)}%)`);
       }
     }
     if(longs.length>CONFIG.MAX_POSITIONS)
