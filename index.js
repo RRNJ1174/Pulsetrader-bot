@@ -890,24 +890,55 @@ app.get("/api/autotrader/status",async(_,res)=>{
 
 app.get("/api/holdings",async(_,res)=>{
   try{
-    const pos=await tzPositions();
-    const holdings=await Promise.all(pos.map(async p=>{
-      const q=await finnhub(`/quote?symbol=${p.sym}`).catch(()=>null);
-      const cur=parseFloat(q?.c||0);
-      const pnl=cur>0?(cur-p.entry)*p.qty:0;
-      const pct=cur>0&&p.entry>0?((cur-p.entry)/p.entry*100):0;
-      const state=openTrades[p.sym];
-      return {
-        symbol:p.sym,qty:p.qty,avg_entry:p.entry.toFixed(4),current_price:cur.toFixed(4),
-        unrealized_pnl:pnl.toFixed(2),unrealized_pnl_pct:pct.toFixed(2)+"%",
-        hard_stop:(p.entry*(1-CONFIG.HARD_STOP_PCT/100)).toFixed(4),
-        first_target:(p.entry*(1+CONFIG.FIRST_TARGET_PCT/100)).toFixed(4),
-        pattern_score:state?.patternScore||"?",
-        rel_vol:state?.relVol||"?",
-      };
+    // Read DIRECTLY from TZ — no internal state overlay
+    // This ensures UI always matches exactly what TZ has
+    const raw=await tzAPI("GET",`/v1/api/accounts/${ACC()}/positions`);
+    const list=Array.isArray(raw)?raw:(raw.positions||raw.data||raw||[]);
+    if(!Array.isArray(list)||!list.length){
+      const acc2=await tzAccount().catch(()=>null);
+      return res.json({holdings:[],count:0,total_pnl:"0.00",today_pnl:acc2?.pnl?.toFixed(2)||"0"});
+    }
+
+    // Get all unique symbols for batch price fetch
+    const syms=[...new Set(list.map(p=>(p.symbol||p.ticker||"").toUpperCase()).filter(Boolean))];
+    const priceMap={};
+    await Promise.all(syms.map(async sym=>{
+      const q=await finnhub(`/quote?symbol=${sym}`).catch(()=>null);
+      priceMap[sym]=parseFloat(q?.c||0);
     }));
+
+    const holdings=list.map(p=>{
+      const sym=(p.symbol||p.ticker||"").toString().trim().toUpperCase();
+      const qty=Math.abs(parseFloat(p.shares??p.quantity??p.qty??0));
+      const entry=parseFloat(p.priceAvg??p.averagePrice??p.avgPrice??p.entryPrice??0);
+      const side=(p.side||"").toLowerCase();
+      const isLong=side!=="sell";
+      const cur=priceMap[sym]||entry;
+      const pnl=entry>0&&cur>0?(cur-entry)*qty:0;
+      const pct=entry>0&&cur>0?((cur-entry)/entry*100):0;
+      return {
+        symbol:sym,
+        qty,
+        side:isLong?"long":"short",
+        avg_entry:entry.toFixed(4),
+        current_price:cur.toFixed(4),
+        unrealized_pnl:pnl.toFixed(2),
+        unrealized_pnl_pct:pct.toFixed(2)+"%",
+        hard_stop:(entry*(1-CONFIG.HARD_STOP_PCT/100)).toFixed(4),
+        first_target:(entry*(1+CONFIG.FIRST_TARGET_PCT/100)).toFixed(4),
+      };
+    }).filter(p=>p.symbol&&p.qty>0);
+
     const acc=await tzAccount().catch(()=>null);
-    res.json({holdings,count:pos.length,total_pnl:holdings.reduce((s,h)=>s+parseFloat(h.unrealized_pnl),0).toFixed(2),today_pnl:acc?.pnl?.toFixed(2)||"0"});
+    const totalPnl=holdings.reduce((s,h)=>s+parseFloat(h.unrealized_pnl),0);
+    res.json({
+      holdings,
+      count:holdings.length,
+      total_pnl:totalPnl.toFixed(2),
+      today_pnl:acc?.pnl?.toFixed(2)||"0",
+      equity:acc?.equity?.toFixed(2)||"0",
+      cash:acc?.cash?.toFixed(2)||"0",
+    });
   }catch(e){res.status(500).json({error:e.message});}
 });
 
