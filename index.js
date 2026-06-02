@@ -195,28 +195,31 @@ const tzPositions = async () => {
     const list=Array.isArray(d)?d:(d.positions||d.data||d||[]);
     if(!Array.isArray(list)||!list.length) return [];
 
-    // Parse all positions
+    // Parse ALL positions — detect long vs short from raw shares sign or side field
     const raw=list.map(p=>{
       const sym=(p.symbol||p.ticker||"").toString().trim().toUpperCase();
-      const qty=Math.abs(parseFloat(p.shares??p.quantity??p.qty??0));
+      const rawShares=parseFloat(p.shares??p.quantity??p.qty??0);
+      const qty=Math.abs(rawShares);
       const entry=parseFloat(p.priceAvg??p.averagePrice??p.avgPrice??p.entryPrice??0);
-      const side=(p.side||"").toLowerCase();
-      return {sym,qty,entry,isLong:side!=="sell"};
-    }).filter(p=>p.sym&&p.qty>0&&p.isLong);
+      const sideStr=(p.side||"").toLowerCase();
+      // TZ paper: negative shares = short position, positive = long
+      // side field: "Buy" or "Long" = long, "Sell" or "Short" or "SellShort" = short
+      const isShort = rawShares < 0 || sideStr==="sell" || sideStr==="short" || sideStr==="sellshort";
+      return {sym, qty, entry, isShort};
+    }).filter(p=>p.sym&&p.qty>0);
 
     // MERGE duplicate symbols — TZ paper sometimes shows same symbol twice
-    // Use weighted average entry price, sum quantities
     const merged={};
     for(const p of raw){
-      if(!merged[p.sym]){
-        merged[p.sym]={sym:p.sym,qty:p.qty,entry:p.entry,isLong:true};
+      const key=`${p.sym}_${p.isShort?"S":"L"}`;
+      if(!merged[key]){
+        merged[key]={sym:p.sym,qty:p.qty,entry:p.entry,isShort:p.isShort};
       } else {
-        // Weighted average entry
-        const totalQty=merged[p.sym].qty+p.qty;
-        const avgEntry=(merged[p.sym].entry*merged[p.sym].qty + p.entry*p.qty)/totalQty;
-        merged[p.sym].qty=totalQty;
-        merged[p.sym].entry=parseFloat(avgEntry.toFixed(4));
-        console.log(`🔀 Merged duplicate ${p.sym}: qty=${totalQty} avgEntry=$${avgEntry.toFixed(2)}`);
+        const totalQty=merged[key].qty+p.qty;
+        const avgEntry=(merged[key].entry*merged[key].qty + p.entry*p.qty)/totalQty;
+        merged[key].qty=totalQty;
+        merged[key].entry=parseFloat(avgEntry.toFixed(4));
+        console.log(`🔀 Merged duplicate ${p.sym}(${p.isShort?"SHORT":"LONG"}): qty=${totalQty} avgEntry=$${avgEntry.toFixed(2)}`);
       }
     }
     return Object.values(merged);
@@ -225,11 +228,19 @@ const tzPositions = async () => {
 
 const tzOrder = async (symbol,side,qty,price) => {
   if(!qty||qty<1||!price||price<=0) return {success:false,error:"invalid"};
-  const lp=side==="Buy"?parseFloat((price*1.002).toFixed(4)):parseFloat((price*0.998).toFixed(4));
+  // TZ paper order sides:
+  // "Buy"       = open long position
+  // "Sell"      = close long position  
+  // "SellShort" = open short position
+  // "BuyCover"  = close short position
+  // We ONLY use Buy and Sell — no shorting
+  const tzSide = side==="Buy" ? "Buy" : "Sell";
+  const lp=tzSide==="Buy"?parseFloat((price*1.002).toFixed(4)):parseFloat((price*0.998).toFixed(4));
   const body={
     clientOrderId:`PT-${Date.now()}-${Math.random().toString(36).slice(2,6).toUpperCase()}`,
-    symbol:symbol.toUpperCase(),securityType:"Stock",side,orderType:"Limit",
-    limitPrice:lp,price:lp,traderAction:side,
+    symbol:symbol.toUpperCase(),securityType:"Stock",
+    side:tzSide,orderType:"Limit",
+    limitPrice:lp,price:lp,traderAction:tzSide,
     quantity:Math.floor(qty),orderQuantity:Math.floor(qty),
     timeInForce:"Day",route:process.env.TZ_ROUTE||"SMART",
   };
@@ -465,7 +476,12 @@ const scanForSpikes = async () => {
 // ════════════════════════════════════════════════════════════════════════════
 const managePositions = async (tzPos) => {
   for(const pos of tzPos){
-    const {sym,qty,entry}=pos;
+    const {sym,qty,entry,isShort}=pos;
+    // NEVER manage short positions — skip them entirely
+    if(isShort){
+      console.log(`⏭️ Skipping ${sym} — short position (not managed by bot)`);
+      continue;
+    }
     const state=openTrades[sym];
     if(!state||entry<=0||qty<=0) continue;
 
@@ -615,14 +631,15 @@ const autoTrade = async () => {
 
     // 3. Check max positions — only count bot-managed positions
     // Don't count stale/legacy TZ positions the bot didn't enter this session
-    const botManaged=tzPos.filter(p=>openTrades[p.sym]).length;
+    const longPos=tzPos.filter(p=>!p.isShort);
+    const botManaged=longPos.filter(p=>openTrades[p.sym]).length;
     if(botManaged>=CONFIG.MAX_POSITIONS){
-      console.log(`🛑 Max ${CONFIG.MAX_POSITIONS} bot positions (${botManaged} managed, ${tzPos.length} total in TZ)`);
+      console.log(`🛑 Max ${CONFIG.MAX_POSITIONS} bot positions (${botManaged} managed, ${longPos.length} longs in TZ)`);
       return;
     }
-    // Also block if TZ has too many total positions (risk control)
-    if(tzPos.length>=15){
-      console.log(`⚠️ TZ has ${tzPos.length} total positions — not adding more until cleaned up`);
+    // Also block if TZ has too many total long positions (risk control)
+    if(longPos.length>=15){
+      console.log(`⚠️ TZ has ${longPos.length} long positions — not adding more until cleaned up`);
       return;
     }
 
@@ -754,15 +771,18 @@ const startup = async () => {
   await loadPatterns();
   try {
     const positions=await tzPositions();
-    for(const p of positions){
+    const longs=positions.filter(p=>!p.isShort);
+    const shorts=positions.filter(p=>p.isShort);
+    if(shorts.length) console.log(`⚠️ Found ${shorts.length} SHORT positions in TZ: ${shorts.map(p=>p.sym).join(",")} — bot will NOT manage these`);
+    for(const p of longs){
       if(!openTrades[p.sym]&&p.entry>0){
         openTrades[p.sym]={entry:p.entry,qty:p.qty,peak:p.entry,halfSold:false,quarterSold:false,time:Date.now(),hour:new Date().getHours()};
-        console.log(`📍 Restored: ${p.sym} x${p.qty} @$${p.entry}`);
+        console.log(`📍 Restored LONG: ${p.sym} x${p.qty} @$${p.entry}`);
       }
     }
-    if(positions.length>CONFIG.MAX_POSITIONS)
-      console.log(`⚠️ TZ has ${positions.length} positions (>${CONFIG.MAX_POSITIONS} max). All restored for management. No new entries until below ${CONFIG.MAX_POSITIONS}.`);
-    console.log(`🛡️ ${Object.keys(openTrades).length} positions under management`);
+    if(longs.length>CONFIG.MAX_POSITIONS)
+      console.log(`⚠️ TZ has ${longs.length} long positions (>${CONFIG.MAX_POSITIONS} max). All restored for management.`);
+    console.log(`🛡️ ${Object.keys(openTrades).length} long positions under management`);
   } catch(e){console.log("Startup:",e.message);}
 };
 
