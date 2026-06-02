@@ -582,7 +582,27 @@ const autoTrade = async () => {
 
     if(tzPos.length) await managePositions(tzPos);
 
-    // 2. Trading hours only: 4am-7:45pm ET, weekdays
+    // 2. EOD sweep — sell everything at 3:55pm ET (before close)
+    const isEOD=!isWeekend&&t>=1955&&t<=2000;
+    if(isEOD&&tzPos.length){
+      console.log(`🌙 EOD SWEEP — selling ${tzPos.length} positions before close`);
+      for(const p of tzPos){
+        const q=await finnhub(`/quote?symbol=${p.sym}`).catch(()=>null);
+        const price=parseFloat(q?.c||0)||p.entry;
+        if(price>0){
+          const r=await tzOrder(p.sym,"Sell",p.qty,price);
+          if(r.success){
+            const pnl=((price-p.entry)/p.entry*100).toFixed(1);
+            console.log(`🌙 SOLD ${p.sym} x${p.qty} @$${price.toFixed(2)} | ${pnl}%`);
+            if(openTrades[p.sym]) recordPattern(openTrades[p.sym],parseFloat(pnl));
+            delete openTrades[p.sym];
+          }
+        }
+      }
+      return;
+    }
+
+    // Trading hours only: 4am-7:45pm ET, weekdays
     if(isWeekend||t<400||t>1945){
       // Overnight: save pre-market watchlist from today's top movers
       if(lastGainers.length&&!isWeekend){
@@ -593,9 +613,16 @@ const autoTrade = async () => {
       return;
     }
 
-    // 3. Check max positions
-    if(tzPos.length>=CONFIG.MAX_POSITIONS){
-      console.log(`🛑 Max ${CONFIG.MAX_POSITIONS} positions (${tzPos.length} open)`);
+    // 3. Check max positions — only count bot-managed positions
+    // Don't count stale/legacy TZ positions the bot didn't enter this session
+    const botManaged=tzPos.filter(p=>openTrades[p.sym]).length;
+    if(botManaged>=CONFIG.MAX_POSITIONS){
+      console.log(`🛑 Max ${CONFIG.MAX_POSITIONS} bot positions (${botManaged} managed, ${tzPos.length} total in TZ)`);
+      return;
+    }
+    // Also block if TZ has too many total positions (risk control)
+    if(tzPos.length>=15){
+      console.log(`⚠️ TZ has ${tzPos.length} total positions — not adding more until cleaned up`);
       return;
     }
 
