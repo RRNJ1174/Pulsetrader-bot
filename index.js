@@ -1,5 +1,5 @@
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  PULSETRADER v18.2 — VOLUME SPIKE HUNTER                              ║
+// ║  PULSETRADER v18.3 — VOLUME SPIKE HUNTER                              ║
 // ║  Catches: JZ +325% | HKIT +350% | ABTS +115% | HUBC +97% type moves  ║
 // ║  Scans every 60s | Learns chart patterns | Max 5 positions            ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
@@ -51,7 +51,7 @@ button{width:100%;background:#00ff88;color:#020508;border:none;border-radius:8px
 button:active{opacity:.8}
 .err{color:#ff3355;font-size:11px;text-align:center;margin-top:8px;letter-spacing:1px;min-height:14px}
 </style></head><body>
-<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v18.2</div></div>
+<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v18.3</div></div>
 <div class="box"><form method="POST" action="/login">
 <input type="password" name="passcode" maxlength="20" placeholder="••••••••" autocomplete="off" autofocus>
 <button type="submit">ENTER</button>
@@ -222,7 +222,32 @@ const tzPositions = async () => {
         console.log(`🔀 Merged duplicate ${p.sym}(${p.isShort?"SHORT":"LONG"}): qty=${totalQty} avgEntry=$${avgEntry.toFixed(2)}`);
       }
     }
-    return Object.values(merged);
+    // Net out opposing positions — if same symbol has both long and short,
+    // subtract the smaller from the larger. If short >= long, remove long entirely.
+    const result = Object.values(merged);
+    const symbols = [...new Set(result.map(p=>p.sym))];
+    const netted = [];
+    for(const sym of symbols){
+      const long = result.find(p=>p.sym===sym&&!p.isShort);
+      const short = result.find(p=>p.sym===sym&&p.isShort);
+      if(long&&short){
+        // Both exist — net them out
+        if(short.qty>=long.qty){
+          // Short dominates — only keep short, discard long
+          console.log(`⚖️ Netted ${sym}: short(${short.qty}) >= long(${long.qty}) — long removed`);
+          netted.push(short);
+        } else {
+          // Long dominates — reduce long qty
+          const remaining = long.qty - short.qty;
+          console.log(`⚖️ Netted ${sym}: long(${long.qty}) - short(${short.qty}) = ${remaining} remaining long`);
+          netted.push({...long, qty: remaining});
+        }
+      } else {
+        if(long) netted.push(long);
+        if(short) netted.push(short);
+      }
+    }
+    return netted;
   } catch(e){console.log("tzPositions:",e.message);return [];}
 };
 
@@ -750,7 +775,7 @@ const getInterval = () => {
 const startAutoTrader = () => {
   if(autoTraderActive) return;
   autoTraderActive=true;
-  console.log("🤖 PulseTrader v18.2 STARTED — Volume Spike Hunter");
+  console.log("🤖 PulseTrader v18.3 STARTED — Volume Spike Hunter");
   const run=async()=>{
     await autoTrade();
     if(autoTraderActive) scanTimer=setTimeout(run,getInterval());
@@ -820,7 +845,7 @@ app.post("/api/chat",async(req,res)=>{
 
     const recentMem=chatMemory.slice(-16).map(m=>({role:m.role,content:m.content}));
 
-    const sys=`You are PulseTrader v18.2 — elite momentum trading assistant.
+    const sys=`You are PulseTrader v18.3 — elite momentum trading assistant.
 
 LIVE ACCOUNT DATA: ${ctx}
 
@@ -953,7 +978,7 @@ Be direct. Trader language. No fake data ever.`;
       else if(cmd.startsWith("EXECUTE_STATUS")){
         const wins=PATTERNS.winners.length,losses=PATTERNS.losers.length;
         const wr=wins+losses>0?((wins/(wins+losses))*100).toFixed(0):0;
-        action=`\n\n${autoTraderActive?"🟢 RUNNING":"🔴 PAUSED"} | v18.2\nEquity:$${acc?.equity?.toFixed(2)} | Cash:$${acc?.cash?.toFixed(2)}\nP&L:$${acc?.pnl?.toFixed(2)} | Pos:${pos.length}/${CONFIG.MAX_POSITIONS}\nPatterns: ${wins}W/${losses}L (${wr}%WR)`;
+        action=`\n\n${autoTraderActive?"🟢 RUNNING":"🔴 PAUSED"} | v18.3\nEquity:$${acc?.equity?.toFixed(2)} | Cash:$${acc?.cash?.toFixed(2)}\nP&L:$${acc?.pnl?.toFixed(2)} | Pos:${pos.length}/${CONFIG.MAX_POSITIONS}\nPatterns: ${wins}W/${losses}L (${wr}%WR)`;
       }
 
       else if(cmd.startsWith("EXECUTE_STOP")){stopAutoTrader();action="\n\n⏹️ Bot stopped.";}
@@ -1023,7 +1048,7 @@ app.post("/api/autotrader/sellall",async(_,res)=>{
 app.get("/api/autotrader/status",async(_,res)=>{
   const[acc,pos]=await Promise.all([tzAccount().catch(()=>null),tzPositions().catch(()=>[])]);
   res.json({
-    active:autoTraderActive,last_scan:lastScanTime,version:"18.2.0",
+    active:autoTraderActive,last_scan:lastScanTime,version:"18.3.0",
     equity:acc?.equity?.toFixed(2),cash:acc?.cash?.toFixed(2),pnl:acc?.pnl?.toFixed(2),
     positions:pos.length,max_positions:CONFIG.MAX_POSITIONS,
     open_trades:Object.keys(openTrades),
@@ -1150,7 +1175,7 @@ app.get("/api/news",async(req,res)=>{
 });
 
 app.get("/health",(_,res)=>res.json({
-  status:"ok",version:"18.2.0",
+  status:"ok",version:"18.3.0",
   active:autoTraderActive,
   positions:Object.keys(openTrades).length,
   patterns:{winners:PATTERNS.winners.length,losers:PATTERNS.losers.length},
@@ -1162,7 +1187,7 @@ app.get("/health",(_,res)=>res.json({
 // ════════════════════════════════════════════════════════════════════════════
 const PORT=process.env.PORT||3001;
 app.listen(PORT,async()=>{
-  console.log(`⚡ PulseTrader v18.2 — Volume Spike Hunter`);
+  console.log(`⚡ PulseTrader v18.3 — Volume Spike Hunter`);
   console.log(`   Targets: JZ +325% | HKIT +350% | ABTS +115% | HUBC +97%`);
   console.log(`   Max positions: ${CONFIG.MAX_POSITIONS} | Stop: -${CONFIG.HARD_STOP_PCT}%`);
   console.log(`   Target1: +${CONFIG.FIRST_TARGET_PCT}% (sell 50%) | Target2: +${CONFIG.SECOND_TARGET_PCT}% (sell 25%)`);
