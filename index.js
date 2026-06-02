@@ -831,6 +831,7 @@ EXECUTE_MOVERS — shows real top movers
 EXECUTE_ANALYZE:SYMBOL — analyzes a stock
 EXECUTE_STATUS — shows real bot status
 EXECUTE_STOP | EXECUTE_START
+EXECUTE_COVER_ALL — covers ALL short positions in TZ using BuyCover orders
 
 Be direct. Trader language. No fake data ever.`;
 
@@ -947,6 +948,39 @@ Be direct. Trader language. No fake data ever.`;
 
       else if(cmd.startsWith("EXECUTE_STOP")){stopAutoTrader();action="\n\n⏹️ Bot stopped.";}
       else if(cmd.startsWith("EXECUTE_START")){startAutoTrader();action="\n\n🟢 Bot started.";}
+
+      else if(cmd.startsWith("EXECUTE_COVER_ALL")){
+        const allPos=await tzPositions();
+        const shorts=allPos.filter(p=>p.isShort);
+        if(!shorts.length){action="\n\n✅ No short positions — already clean.";}
+        else{
+          let covered=0,failed=0;
+          const results=[];
+          for(const p of shorts){
+            const q=await finnhub(`/quote?symbol=${p.sym}`).catch(()=>null);
+            const price=parseFloat(q?.c||0)||p.entry;
+            if(!price){results.push(`❌ ${p.sym}: no price`);failed++;continue;}
+            const lp=parseFloat((price*1.002).toFixed(4));
+            const body={
+              clientOrderId:`PT-${Date.now()}-${Math.random().toString(36).slice(2,6).toUpperCase()}`,
+              symbol:p.sym,securityType:"Stock",
+              side:"BuyCover",orderType:"Market",
+              limitPrice:lp,price:lp,traderAction:"BuyCover",
+              quantity:Math.floor(p.qty),orderQuantity:Math.floor(p.qty),
+              timeInForce:"Day",route:process.env.TZ_ROUTE||"SMART",
+            };
+            try{
+              const d=await tzAPI("POST",`/v1/api/accounts/${ACC()}/order`,body);
+              console.log(`TZ BuyCover ${p.sym} x${p.qty} @${lp}:`,JSON.stringify(d).slice(0,120));
+              const ok=!["Rejected","Canceled","Expired"].includes(d.orderStatus)&&!!d.orderStatus;
+              if(ok){covered++;results.push(`✅ Covered ${p.sym} x${p.qty} @$${price.toFixed(2)}`);}
+              else{failed++;results.push(`❌ ${p.sym}: ${d.orderStatus||"rejected"}`);}
+            }catch(e){failed++;results.push(`❌ ${p.sym}: ${e.message}`);}
+            await new Promise(r=>setTimeout(r,300));
+          }
+          action=`\n\n🔄 COVER ALL:\n${results.join("\n")}\n\nCovered: ${covered} | Failed: ${failed}`;
+        }
+      }
     }
 
     const finalReply=(display+action).trim();
