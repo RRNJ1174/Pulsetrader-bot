@@ -878,17 +878,22 @@ CRITICAL RULES — NEVER VIOLATE:
 - If asked about positions, use EXECUTE_POSITIONS to fetch real data
 - Only report what is in LIVE ACCOUNT DATA — nothing else
 
-TO EXECUTE REAL ORDERS (add as LAST LINE only):
-EXECUTE_SELL:SYMBOL — sells real TZ position
-EXECUTE_SELLALL — sells all real TZ positions  
-EXECUTE_POSITIONS — shows real positions from TZ
-EXECUTE_MOVERS — shows real top movers
-EXECUTE_ANALYZE:SYMBOL — analyzes a stock
-EXECUTE_STATUS — shows real bot status
-EXECUTE_STOP | EXECUTE_START
-EXECUTE_COVER_ALL — covers ALL short positions in TZ using BuyCover orders
+COMMANDS — always add as LAST LINE when relevant:
+EXECUTE_SELL:SYMBOL — sell a position
+EXECUTE_SELLALL — sell all longs
+EXECUTE_POSITIONS — show real positions
+EXECUTE_MOVERS — show top movers (USE THIS when asked about movers, spikes, setups)
+EXECUTE_ANALYZE:SYMBOL — deep analysis of a stock
+EXECUTE_STATUS — account status
+EXECUTE_STOP | EXECUTE_START — control bot
+EXECUTE_COVER_ALL — cover all shorts
 
-Be direct. Trader language. No fake data ever.`;
+BEHAVIOR RULES:
+- When asked "find setups", "what's moving", "pre-spike setups" → always run EXECUTE_MOVERS
+- When asked about a specific stock → always run EXECUTE_ANALYZE:SYMBOL
+- When asked positions → always run EXECUTE_POSITIONS
+- Be a real trader. Short answers. Use commands aggressively.
+- Never say "I can only report" — just run the command and show real data.`;
 
     const groqMsgs=[{role:"system",content:sys},...recentMem.slice(0,-1),{role:"user",content:userMsg}];
     const reply=await groq(groqMsgs,800);
@@ -1023,7 +1028,7 @@ Be direct. Trader language. No fake data ever.`;
               side:"BuyCover",orderType:"Market",
               limitPrice:lp,price:lp,traderAction:"BuyCover",
               quantity:Math.floor(p.qty),orderQuantity:Math.floor(p.qty),
-              timeInForce:"Day",route:isBuy?"SMART":"TRAFIX_SIM",
+              timeInForce:"Day",route:"TRAFIX_SIM",
             };
             try{
               const d=await tzAPI("POST",`/v1/api/accounts/${ACC()}/order`,body);
