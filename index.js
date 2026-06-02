@@ -1,5 +1,5 @@
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  PULSETRADER v18.0 — VOLUME SPIKE HUNTER                              ║
+// ║  PULSETRADER v18.1 — VOLUME SPIKE HUNTER                              ║
 // ║  Catches: JZ +325% | HKIT +350% | ABTS +115% | HUBC +97% type moves  ║
 // ║  Scans every 60s | Learns chart patterns | Max 5 positions            ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
@@ -749,7 +749,7 @@ const getInterval = () => {
 const startAutoTrader = () => {
   if(autoTraderActive) return;
   autoTraderActive=true;
-  console.log("🤖 PulseTrader v18.0 STARTED — Volume Spike Hunter");
+  console.log("🤖 PulseTrader v18.1 STARTED — Volume Spike Hunter");
   const run=async()=>{
     await autoTrade();
     if(autoTraderActive) scanTimer=setTimeout(run,getInterval());
@@ -870,13 +870,14 @@ Be direct. Trader language. No fake data ever.`;
 
       else if(cmd.startsWith("EXECUTE_SELLALL")){
         const positions=await tzPositions();
+        const longsOnly=positions.filter(p=>!p.isShort);
         let sold=0;
-        for(const p of positions){
+        for(const p of longsOnly){
           const q=await finnhub(`/quote?symbol=${p.sym}`).catch(()=>null);
           const price=parseFloat(q?.c||0)||p.entry;
           if(price){const r=await tzOrder(p.sym,"Sell",p.qty,price);if(r.success){sold++;delete openTrades[p.sym];}}
         }
-        action=`\n\n🔴 Sold ${sold}/${positions.length} positions.`;
+        action=`\n\n🔴 Sold ${sold}/${longsOnly.length} long positions only. Shorts untouched.`;
       }
 
       else if(cmd.startsWith("EXECUTE_BUY:")){
@@ -967,7 +968,7 @@ Be direct. Trader language. No fake data ever.`;
               side:"BuyCover",orderType:"Market",
               limitPrice:lp,price:lp,traderAction:"BuyCover",
               quantity:Math.floor(p.qty),orderQuantity:Math.floor(p.qty),
-              timeInForce:"Day",route:process.env.TZ_ROUTE||"SMART",
+              timeInForce:"Day",route:"TRAFIX_SIM",
             };
             try{
               const d=await tzAPI("POST",`/v1/api/accounts/${ACC()}/order`,body);
@@ -1000,19 +1001,20 @@ app.get("/api/alerts",(_,res)=>res.json({alerts:[]}));
 
 app.post("/api/autotrader/sellall",async(_,res)=>{
   const positions=await tzPositions();
+  const longsOnly=positions.filter(p=>!p.isShort);
   let sold=0;
-  for(const p of positions){
+  for(const p of longsOnly){
     const q=await finnhub(`/quote?symbol=${p.sym}`).catch(()=>null);
     const price=parseFloat(q?.c||0)||p.entry;
     if(price){const r=await tzOrder(p.sym,"Sell",p.qty,price);if(r.success){sold++;delete openTrades[p.sym];}}
   }
-  res.json({sold});
+  res.json({sold,total:longsOnly.length});
 });
 
 app.get("/api/autotrader/status",async(_,res)=>{
   const[acc,pos]=await Promise.all([tzAccount().catch(()=>null),tzPositions().catch(()=>[])]);
   res.json({
-    active:autoTraderActive,last_scan:lastScanTime,version:"18.0.0",
+    active:autoTraderActive,last_scan:lastScanTime,version:"18.1.0",
     equity:acc?.equity?.toFixed(2),cash:acc?.cash?.toFixed(2),pnl:acc?.pnl?.toFixed(2),
     positions:pos.length,max_positions:CONFIG.MAX_POSITIONS,
     open_trades:Object.keys(openTrades),
@@ -1151,7 +1153,7 @@ app.get("/health",(_,res)=>res.json({
 // ════════════════════════════════════════════════════════════════════════════
 const PORT=process.env.PORT||3001;
 app.listen(PORT,async()=>{
-  console.log(`⚡ PulseTrader v18.0 — Volume Spike Hunter`);
+  console.log(`⚡ PulseTrader v18.1 — Volume Spike Hunter`);
   console.log(`   Targets: JZ +325% | HKIT +350% | ABTS +115% | HUBC +97%`);
   console.log(`   Max positions: ${CONFIG.MAX_POSITIONS} | Stop: -${CONFIG.HARD_STOP_PCT}%`);
   console.log(`   Target1: +${CONFIG.FIRST_TARGET_PCT}% (sell 50%) | Target2: +${CONFIG.SECOND_TARGET_PCT}% (sell 25%)`);
