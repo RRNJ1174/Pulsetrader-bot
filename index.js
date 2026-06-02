@@ -1,5 +1,5 @@
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  PULSETRADER v18.3 — VOLUME SPIKE HUNTER                              ║
+// ║  PULSETRADER v19.0 — VOLUME SPIKE HUNTER                              ║
 // ║  Catches: JZ +325% | HKIT +350% | ABTS +115% | HUBC +97% type moves  ║
 // ║  Scans every 60s | Learns chart patterns | Max 5 positions            ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
@@ -51,7 +51,7 @@ button{width:100%;background:#00ff88;color:#020508;border:none;border-radius:8px
 button:active{opacity:.8}
 .err{color:#ff3355;font-size:11px;text-align:center;margin-top:8px;letter-spacing:1px;min-height:14px}
 </style></head><body>
-<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v18.3</div></div>
+<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v19.0</div></div>
 <div class="box"><form method="POST" action="/login">
 <input type="password" name="passcode" maxlength="20" placeholder="••••••••" autocomplete="off" autofocus>
 <button type="submit">ENTER</button>
@@ -82,12 +82,13 @@ const CONFIG = {
   FIRST_TARGET_PCT:   30,     // sell 50% at +30%
   SECOND_TARGET_PCT:  75,     // sell 25% more at +75%
   TRAIL_PCT:          12,     // trail remaining -12% from peak
-  MIN_GAIN_PCT:       15,     // min % gain to consider
-  MIN_VOL:            500000, // min 500k volume
+  MIN_GAIN_PCT:       10,     // min % gain to consider
+  MIN_VOL:            200000, // min 200k volume
   CASH_PCT:           0.18,   // 18% cash per trade
   MAX_CASH_PER_TRADE: 40000,  // max $40k per trade
   MIN_PRICE:          0.10,
-  MAX_PRICE:          500,
+  MAX_PRICE:          20,     // small caps only
+  MAX_MKTCAP_M:       500,    // max $500M market cap
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -268,7 +269,7 @@ const tzOrder = async (symbol,side,qty,price) => {
     side:tzSide,orderType:isBuy?"Limit":"Market",
     limitPrice:lp,price:lp,traderAction:tzSide,
     quantity:Math.floor(qty),orderQuantity:Math.floor(qty),
-    timeInForce:"Day",route:"TRAFIX_SIM",
+    timeInForce:"Day",route:isBuy?"SMART":"TRAFIX_SIM",
   };
   try {
     const d=await tzAPI("POST",`/v1/api/accounts/${ACC()}/order`,body);
@@ -483,7 +484,22 @@ const scanForSpikes = async () => {
     }
   }catch(_){}
 
-  // Source 3: Pre-market watchlist — yesterday's runners
+  // Source 3: Finnhub top gainers
+  try{
+    const fh=await finnhub("/stock/market/gainers?exchange=US");
+    const list=Array.isArray(fh)?fh:(fh.gainers||[]);
+    for(const g of list){
+      const sym=(g.symbol||g.ticker||"").toUpperCase();
+      const price=parseFloat(g.lastPrice||g.price||0);
+      const pct=parseFloat(g.change||g.changePercent||g.dp||0);
+      const vol=parseInt(g.volume||g.v||0);
+      if(sym&&price>=CONFIG.MIN_PRICE&&price<=CONFIG.MAX_PRICE&&pct>=CONFIG.MIN_GAIN_PCT&&vol>=CONFIG.MIN_VOL&&!gainers.find(x=>x.symbol===sym))
+        gainers.push({symbol:sym,price,pct,vol,src:"finnhub"});
+    }
+    if(list.length) console.log(`📡 Finnhub: added ${gainers.filter(g=>g.src==="finnhub").length} more spikes`);
+  }catch(_){}
+
+  // Source 4: Pre-market watchlist — yesterday's runners
   for(const w of preMarketWatchlist){
     try{
       const q=await finnhub(`/quote?symbol=${w}`);
@@ -698,6 +714,11 @@ const autoTrade = async () => {
       // Chart pattern analysis
       const chart=await analyzeChart(stock.symbol);
 
+      // Filter: small/micro cap only
+      if(mktCapM>CONFIG.MAX_MKTCAP_M&&mktCapM>0){
+        console.log(`🚫 ${stock.symbol}: mktcap $${mktCapM.toFixed(0)}M > $${CONFIG.MAX_MKTCAP_M}M limit`);
+        continue;
+      }
       // Only proceed if pattern score is decent
       if(chart.patternScore<20&&chart.relVol<5) continue;
 
@@ -775,7 +796,7 @@ const getInterval = () => {
 const startAutoTrader = () => {
   if(autoTraderActive) return;
   autoTraderActive=true;
-  console.log("🤖 PulseTrader v18.3 STARTED — Volume Spike Hunter");
+  console.log("🤖 PulseTrader v19.0 STARTED — Volume Spike Hunter");
   const run=async()=>{
     await autoTrade();
     if(autoTraderActive) scanTimer=setTimeout(run,getInterval());
@@ -845,7 +866,7 @@ app.post("/api/chat",async(req,res)=>{
 
     const recentMem=chatMemory.slice(-16).map(m=>({role:m.role,content:m.content}));
 
-    const sys=`You are PulseTrader v18.3 — elite momentum trading assistant.
+    const sys=`You are PulseTrader v19.0 — elite momentum trading assistant.
 
 LIVE ACCOUNT DATA: ${ctx}
 
@@ -978,7 +999,7 @@ Be direct. Trader language. No fake data ever.`;
       else if(cmd.startsWith("EXECUTE_STATUS")){
         const wins=PATTERNS.winners.length,losses=PATTERNS.losers.length;
         const wr=wins+losses>0?((wins/(wins+losses))*100).toFixed(0):0;
-        action=`\n\n${autoTraderActive?"🟢 RUNNING":"🔴 PAUSED"} | v18.3\nEquity:$${acc?.equity?.toFixed(2)} | Cash:$${acc?.cash?.toFixed(2)}\nP&L:$${acc?.pnl?.toFixed(2)} | Pos:${pos.length}/${CONFIG.MAX_POSITIONS}\nPatterns: ${wins}W/${losses}L (${wr}%WR)`;
+        action=`\n\n${autoTraderActive?"🟢 RUNNING":"🔴 PAUSED"} | v19.0\nEquity:$${acc?.equity?.toFixed(2)} | Cash:$${acc?.cash?.toFixed(2)}\nP&L:$${acc?.pnl?.toFixed(2)} | Pos:${pos.length}/${CONFIG.MAX_POSITIONS}\nPatterns: ${wins}W/${losses}L (${wr}%WR)`;
       }
 
       else if(cmd.startsWith("EXECUTE_STOP")){stopAutoTrader();action="\n\n⏹️ Bot stopped.";}
@@ -1002,7 +1023,7 @@ Be direct. Trader language. No fake data ever.`;
               side:"BuyCover",orderType:"Market",
               limitPrice:lp,price:lp,traderAction:"BuyCover",
               quantity:Math.floor(p.qty),orderQuantity:Math.floor(p.qty),
-              timeInForce:"Day",route:"TRAFIX_SIM",
+              timeInForce:"Day",route:isBuy?"SMART":"TRAFIX_SIM",
             };
             try{
               const d=await tzAPI("POST",`/v1/api/accounts/${ACC()}/order`,body);
@@ -1048,7 +1069,7 @@ app.post("/api/autotrader/sellall",async(_,res)=>{
 app.get("/api/autotrader/status",async(_,res)=>{
   const[acc,pos]=await Promise.all([tzAccount().catch(()=>null),tzPositions().catch(()=>[])]);
   res.json({
-    active:autoTraderActive,last_scan:lastScanTime,version:"18.3.0",
+    active:autoTraderActive,last_scan:lastScanTime,version:"19.0.0",
     equity:acc?.equity?.toFixed(2),cash:acc?.cash?.toFixed(2),pnl:acc?.pnl?.toFixed(2),
     positions:pos.length,max_positions:CONFIG.MAX_POSITIONS,
     open_trades:Object.keys(openTrades),
@@ -1175,7 +1196,7 @@ app.get("/api/news",async(req,res)=>{
 });
 
 app.get("/health",(_,res)=>res.json({
-  status:"ok",version:"18.3.0",
+  status:"ok",version:"19.0.0",
   active:autoTraderActive,
   positions:Object.keys(openTrades).length,
   patterns:{winners:PATTERNS.winners.length,losers:PATTERNS.losers.length},
@@ -1187,7 +1208,7 @@ app.get("/health",(_,res)=>res.json({
 // ════════════════════════════════════════════════════════════════════════════
 const PORT=process.env.PORT||3001;
 app.listen(PORT,async()=>{
-  console.log(`⚡ PulseTrader v18.3 — Volume Spike Hunter`);
+  console.log(`⚡ PulseTrader v19.0 — Volume Spike Hunter`);
   console.log(`   Targets: JZ +325% | HKIT +350% | ABTS +115% | HUBC +97%`);
   console.log(`   Max positions: ${CONFIG.MAX_POSITIONS} | Stop: -${CONFIG.HARD_STOP_PCT}%`);
   console.log(`   Target1: +${CONFIG.FIRST_TARGET_PCT}% (sell 50%) | Target2: +${CONFIG.SECOND_TARGET_PCT}% (sell 25%)`);
