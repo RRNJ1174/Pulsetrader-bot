@@ -654,13 +654,13 @@ const autoTrade = async () => {
     lastGainers=movers.slice(0,20);
     console.log(`🔥 Top spikes: ${movers.slice(0,5).map(g=>`${g.symbol}+${g.pct?.toFixed(0)}% ${(g.vol/1e6).toFixed(1)}Mvol`).join(" | ")}`);
 
-    // 6. Filter owned
-    const owned=tzPos.map(p=>p.sym);
-    const candidates=movers.filter(g=>!owned.includes(g.symbol)).slice(0,8);
+    // 6. Filter owned — only exclude LONG positions (shorts don't block new buys)
+    const ownedLongs=longPos.map(p=>p.sym);
+    const candidates=movers.filter(g=>!ownedLongs.includes(g.symbol)).slice(0,8);
     if(!candidates.length){console.log("⏭️ All spikes already owned");return;}
 
     // 7. Analyze and score each candidate
-    const slotsLeft=CONFIG.MAX_POSITIONS-tzPos.length;
+    const slotsLeft=CONFIG.MAX_POSITIONS-longPos.length;
     const scored=[];
 
     for(const stock of candidates.slice(0,6)){
