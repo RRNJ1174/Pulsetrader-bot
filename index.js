@@ -194,13 +194,32 @@ const tzPositions = async () => {
     if(!_dumped){_dumped=true;const arr=Array.isArray(d)?d:(d.positions||d.data||[]);if(arr[0])console.log("🔍 TZ sample:",JSON.stringify(arr[0]).slice(0,200));}
     const list=Array.isArray(d)?d:(d.positions||d.data||d||[]);
     if(!Array.isArray(list)||!list.length) return [];
-    return list.map(p=>{
+
+    // Parse all positions
+    const raw=list.map(p=>{
       const sym=(p.symbol||p.ticker||"").toString().trim().toUpperCase();
       const qty=Math.abs(parseFloat(p.shares??p.quantity??p.qty??0));
       const entry=parseFloat(p.priceAvg??p.averagePrice??p.avgPrice??p.entryPrice??0);
       const side=(p.side||"").toLowerCase();
       return {sym,qty,entry,isLong:side!=="sell"};
     }).filter(p=>p.sym&&p.qty>0&&p.isLong);
+
+    // MERGE duplicate symbols — TZ paper sometimes shows same symbol twice
+    // Use weighted average entry price, sum quantities
+    const merged={};
+    for(const p of raw){
+      if(!merged[p.sym]){
+        merged[p.sym]={sym:p.sym,qty:p.qty,entry:p.entry,isLong:true};
+      } else {
+        // Weighted average entry
+        const totalQty=merged[p.sym].qty+p.qty;
+        const avgEntry=(merged[p.sym].entry*merged[p.sym].qty + p.entry*p.qty)/totalQty;
+        merged[p.sym].qty=totalQty;
+        merged[p.sym].entry=parseFloat(avgEntry.toFixed(4));
+        console.log(`🔀 Merged duplicate ${p.sym}: qty=${totalQty} avgEntry=$${avgEntry.toFixed(2)}`);
+      }
+    }
+    return Object.values(merged);
   } catch(e){console.log("tzPositions:",e.message);return [];}
 };
 
@@ -930,19 +949,34 @@ app.get("/api/holdings",async(_,res)=>{
       priceMap[sym]=parseFloat(q?.c||0);
     }));
 
-    const holdings=list.map(p=>{
+    // Parse and MERGE duplicate symbols (TZ paper quirk)
+    const rawMap={};
+    for(const p of list){
       const sym=(p.symbol||p.ticker||"").toString().trim().toUpperCase();
+      if(!sym) continue;
       const qty=Math.abs(parseFloat(p.shares??p.quantity??p.qty??0));
       const entry=parseFloat(p.priceAvg??p.averagePrice??p.avgPrice??p.entryPrice??0);
       const side=(p.side||"").toLowerCase();
-      const isLong=side!=="sell";
+      if(side==="sell"||qty<=0) continue;
+      if(!rawMap[sym]){
+        rawMap[sym]={sym,qty,entry};
+      } else {
+        const totalQty=rawMap[sym].qty+qty;
+        rawMap[sym].entry=(rawMap[sym].entry*rawMap[sym].qty+entry*qty)/totalQty;
+        rawMap[sym].qty=totalQty;
+      }
+    }
+    const holdings=Object.values(rawMap).map(p=>{
+      const sym=p.sym;
+      const qty=p.qty;
+      const entry=p.entry;
       const cur=priceMap[sym]||entry;
       const pnl=entry>0&&cur>0?(cur-entry)*qty:0;
       const pct=entry>0&&cur>0?((cur-entry)/entry*100):0;
       return {
         symbol:sym,
         qty,
-        side:isLong?"long":"short",
+        side:"long",
         avg_entry:entry.toFixed(4),
         current_price:cur.toFixed(4),
         unrealized_pnl:pnl.toFixed(2),
