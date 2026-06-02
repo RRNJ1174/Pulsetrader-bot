@@ -463,9 +463,25 @@ const managePositions = async (tzPos) => {
 
     // ── HARD STOP -15% ──
     if(pnlPct<=-CONFIG.HARD_STOP_PCT){
+      // Only fire stop if market is open — prevent duplicate orders overnight
+      const etNow=new Date(new Date().toLocaleString("en-US",{timeZone:"America/New_York"}));
+      const tNow=etNow.getHours()*100+etNow.getMinutes();
+      const isWeekday=etNow.getDay()>=1&&etNow.getDay()<=5;
+      const mktOpen=isWeekday&&tNow>=400&&tNow<=1945; // 4am-7:45pm only
+      if(!mktOpen){
+        console.log(`⏸️ STOP queued for ${sym} (${pnlPct.toFixed(1)}%) — market closed, will fire at open`);
+        state._stopQueued=true;
+        continue;
+      }
+      // Don't re-send if already queued
+      if(state._stopSent){
+        console.log(`⏸️ STOP already sent for ${sym} — waiting for fill`);
+        continue;
+      }
       console.log(`🛑 STOP ${sym} ${pnlPct.toFixed(1)}%`);
       const r=await tzOrder(sym,"Sell",qty,cur);
       if(r.success){
+        state._stopSent=true; // mark as sent — don't re-send
         recordPattern(state, pnlPct);
         tradeLog.unshift({type:"STOP",symbol:sym,qty,price:cur,pnlPct:pnlPct.toFixed(1),ts:new Date().toISOString()});
         await supabase("pulsetrader_trades",{method:"POST",body:JSON.stringify({symbol:sym,side:"SELL",qty,entry_price:entry,exit_price:cur,pnl:(cur-entry)*qty,reason:"HARD_STOP"})}).catch(()=>{});
@@ -503,9 +519,16 @@ const managePositions = async (tzPos) => {
 
     // ── TRAIL STOP -12% from peak (after first target hit) ──
     if(state.halfSold && fromPeak<=-CONFIG.TRAIL_PCT){
+      const etNow2=new Date(new Date().toLocaleString("en-US",{timeZone:"America/New_York"}));
+      const tNow2=etNow2.getHours()*100+etNow2.getMinutes();
+      const isWeekday2=etNow2.getDay()>=1&&etNow2.getDay()<=5;
+      const mktOpen2=isWeekday2&&tNow2>=400&&tNow2<=1945;
+      if(!mktOpen2){console.log(`⏸️ Trail queued for ${sym} — market closed`);continue;}
+      if(state._trailSent){console.log(`⏸️ Trail already sent for ${sym}`);continue;}
       console.log(`📉 TRAIL ${sym} ${fromPeak.toFixed(1)}% from peak`);
       const r=await tzOrder(sym,"Sell",qty,cur);
       if(r.success){
+        state._trailSent=true;
         recordPattern(state, pnlPct);
         tradeLog.unshift({type:"TRAIL",symbol:sym,qty,price:cur,pnlPct:pnlPct.toFixed(1),ts:new Date().toISOString()});
         await supabase("pulsetrader_trades",{method:"POST",body:JSON.stringify({symbol:sym,side:"SELL",qty,entry_price:entry,exit_price:cur,pnl:(cur-entry)*qty,reason:"TRAIL_STOP"})}).catch(()=>{});
