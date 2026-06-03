@@ -1,5 +1,5 @@
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  PULSETRADER v19.0 — VOLUME SPIKE HUNTER                              ║
+// ║  PULSETRADER v19.1 — VOLUME SPIKE HUNTER                              ║
 // ║  Catches: JZ +325% | HKIT +350% | ABTS +115% | HUBC +97% type moves  ║
 // ║  Scans every 60s | Learns chart patterns | Max 5 positions            ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
@@ -51,7 +51,7 @@ button{width:100%;background:#00ff88;color:#020508;border:none;border-radius:8px
 button:active{opacity:.8}
 .err{color:#ff3355;font-size:11px;text-align:center;margin-top:8px;letter-spacing:1px;min-height:14px}
 </style></head><body>
-<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v19.0</div></div>
+<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v19.1</div></div>
 <div class="box"><form method="POST" action="/login">
 <input type="password" name="passcode" maxlength="20" placeholder="••••••••" autocomplete="off" autofocus>
 <button type="submit">ENTER</button>
@@ -115,6 +115,7 @@ let scanTimer = null;
 let lastScanTime = null;
 let lastGainers  = [];
 let preMarketWatchlist = []; // stocks to watch from previous day
+let preSpikeWatchlist  = []; // stocks showing early volume — pre-spike candidates
 
 // ════════════════════════════════════════════════════════════════════════════
 // API HELPERS
@@ -437,6 +438,56 @@ const loadPatterns = async () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
+// PRE-SPIKE SCANNER — finds stocks building volume BEFORE the big move
+// Looks for: unusual volume + small price move = coiling for explosion
+// ════════════════════════════════════════════════════════════════════════════
+const scanPreSpike = async () => {
+  const candidates = [];
+  try {
+    // Get stocks with abnormal volume but not yet big movers (2-8% up)
+    // These are stocks about to spike — enter early for maximum profit
+    const urls=[
+      "/v1beta1/screener/stocks/movers?by=volume&top=50&market_type=sip",
+      "/v1beta1/screener/stocks/movers?by=volume&top=50",
+    ];
+    for(const url of urls){
+      try{
+        const d=await alpaca(url);
+        const list=[...(d.gainers||[]),...(d.losers||[])];
+        if(list.length){
+          for(const g of list){
+            const price=g.price||0;
+            const pct=Math.abs(g.percent_change||0);
+            const vol=g.volume||0;
+            // Pre-spike criteria: under $20, moving 2-15%, high volume, small/micro cap
+            if(price>=CONFIG.MIN_PRICE&&price<=CONFIG.MAX_PRICE&&
+               pct>=2&&pct<=30&&vol>=CONFIG.MIN_VOL){
+              candidates.push({
+                symbol:g.symbol, price, pct:g.percent_change, vol,
+                src:"prescan", prePike:true
+              });
+            }
+          }
+          break;
+        }
+      }catch(_){}
+    }
+
+    // Also check yesterday's after-hours movers — these gap up at open
+    const ahMovers = lastGainers.filter(g=>g.pct>5).slice(0,10);
+    for(const g of ahMovers){
+      if(!candidates.find(c=>c.symbol===g.symbol))
+        candidates.push({...g, src:"ah_watchlist", preSpike:true});
+    }
+
+    if(candidates.length){
+      preSpikeWatchlist = candidates.slice(0,15);
+      console.log(`🔭 Pre-spike watchlist: ${preSpikeWatchlist.map(g=>g.symbol).join(", ")}`);
+    }
+  } catch(e){ console.log("scanPreSpike:", e.message); }
+};
+
+// ════════════════════════════════════════════════════════════════════════════
 // SCANNER — Find volume spikes like JZ, HKIT, ABTS, HUBC
 // ════════════════════════════════════════════════════════════════════════════
 const scanForSpikes = async () => {
@@ -506,6 +557,16 @@ const scanForSpikes = async () => {
       const price=parseFloat(q.c||0),pct=parseFloat(q.dp||0),vol=parseInt(q.v||0);
       if(price>0&&pct>=5&&!gainers.find(x=>x.symbol===w))
         gainers.push({symbol:w,price,pct,vol,src:"watchlist"});
+    }catch(_){}
+  }
+
+  // Source 5: Pre-spike watchlist — stocks coiling for big moves
+  for(const w of preSpikeWatchlist){
+    try{
+      const q=await finnhub(`/quote?symbol=${w.symbol}`);
+      const price=parseFloat(q.c||0),pct=parseFloat(q.dp||0),vol=parseInt(q.v||0);
+      if(price>0&&price<=CONFIG.MAX_PRICE&&pct>=CONFIG.MIN_GAIN_PCT&&vol>=CONFIG.MIN_VOL&&!gainers.find(x=>x.symbol===w.symbol))
+        gainers.push({symbol:w.symbol,price,pct,vol,src:"prescan"});
     }catch(_){}
   }
 
@@ -667,9 +728,13 @@ const autoTrade = async () => {
         preMarketWatchlist=lastGainers.slice(0,10).map(g=>g.symbol);
         console.log(`📋 Pre-market watchlist: ${preMarketWatchlist.join(", ")}`);
       }
+      // Run pre-spike scan overnight to build tomorrow's watchlist
+      if(!isWeekend) await scanPreSpike();
       console.log(`⏸️ Outside trading hours`);
       return;
     }
+    // Run pre-spike scan every pre-market hour to catch early movers
+    if(t>=400&&t<930) await scanPreSpike();
 
     // 3. Check max positions — only count bot-managed positions
     // Don't count stale/legacy TZ positions the bot didn't enter this session
@@ -796,7 +861,7 @@ const getInterval = () => {
 const startAutoTrader = () => {
   if(autoTraderActive) return;
   autoTraderActive=true;
-  console.log("🤖 PulseTrader v19.0 STARTED — Volume Spike Hunter");
+  console.log("🤖 PulseTrader v19.1 STARTED — Volume Spike Hunter");
   const run=async()=>{
     await autoTrade();
     if(autoTraderActive) scanTimer=setTimeout(run,getInterval());
@@ -866,7 +931,7 @@ app.post("/api/chat",async(req,res)=>{
 
     const recentMem=chatMemory.slice(-16).map(m=>({role:m.role,content:m.content}));
 
-    const sys=`You are PulseTrader v19.0 — elite momentum trading assistant.
+    const sys=`You are PulseTrader v19.1 — elite momentum trading assistant.
 
 LIVE ACCOUNT DATA: ${ctx}
 
@@ -1004,7 +1069,7 @@ BEHAVIOR RULES:
       else if(cmd.startsWith("EXECUTE_STATUS")){
         const wins=PATTERNS.winners.length,losses=PATTERNS.losers.length;
         const wr=wins+losses>0?((wins/(wins+losses))*100).toFixed(0):0;
-        action=`\n\n${autoTraderActive?"🟢 RUNNING":"🔴 PAUSED"} | v19.0\nEquity:$${acc?.equity?.toFixed(2)} | Cash:$${acc?.cash?.toFixed(2)}\nP&L:$${acc?.pnl?.toFixed(2)} | Pos:${pos.length}/${CONFIG.MAX_POSITIONS}\nPatterns: ${wins}W/${losses}L (${wr}%WR)`;
+        action=`\n\n${autoTraderActive?"🟢 RUNNING":"🔴 PAUSED"} | v19.1\nEquity:$${acc?.equity?.toFixed(2)} | Cash:$${acc?.cash?.toFixed(2)}\nP&L:$${acc?.pnl?.toFixed(2)} | Pos:${pos.length}/${CONFIG.MAX_POSITIONS}\nPatterns: ${wins}W/${losses}L (${wr}%WR)`;
       }
 
       else if(cmd.startsWith("EXECUTE_STOP")){stopAutoTrader();action="\n\n⏹️ Bot stopped.";}
@@ -1074,7 +1139,7 @@ app.post("/api/autotrader/sellall",async(_,res)=>{
 app.get("/api/autotrader/status",async(_,res)=>{
   const[acc,pos]=await Promise.all([tzAccount().catch(()=>null),tzPositions().catch(()=>[])]);
   res.json({
-    active:autoTraderActive,last_scan:lastScanTime,version:"19.0.0",
+    active:autoTraderActive,last_scan:lastScanTime,version:"19.1.0",
     equity:acc?.equity?.toFixed(2),cash:acc?.cash?.toFixed(2),pnl:acc?.pnl?.toFixed(2),
     positions:pos.length,max_positions:CONFIG.MAX_POSITIONS,
     open_trades:Object.keys(openTrades),
@@ -1201,7 +1266,7 @@ app.get("/api/news",async(req,res)=>{
 });
 
 app.get("/health",(_,res)=>res.json({
-  status:"ok",version:"19.0.0",
+  status:"ok",version:"19.1.0",
   active:autoTraderActive,
   positions:Object.keys(openTrades).length,
   patterns:{winners:PATTERNS.winners.length,losers:PATTERNS.losers.length},
@@ -1213,7 +1278,7 @@ app.get("/health",(_,res)=>res.json({
 // ════════════════════════════════════════════════════════════════════════════
 const PORT=process.env.PORT||3001;
 app.listen(PORT,async()=>{
-  console.log(`⚡ PulseTrader v19.0 — Volume Spike Hunter`);
+  console.log(`⚡ PulseTrader v19.1 — Volume Spike Hunter`);
   console.log(`   Targets: JZ +325% | HKIT +350% | ABTS +115% | HUBC +97%`);
   console.log(`   Max positions: ${CONFIG.MAX_POSITIONS} | Stop: -${CONFIG.HARD_STOP_PCT}%`);
   console.log(`   Target1: +${CONFIG.FIRST_TARGET_PCT}% (sell 50%) | Target2: +${CONFIG.SECOND_TARGET_PCT}% (sell 25%)`);
