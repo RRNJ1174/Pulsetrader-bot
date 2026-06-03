@@ -1,6 +1,6 @@
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  PULSETRADER v19.3 — VOLUME SPIKE HUNTER (FINNHUB FIXED)               ║
-// ║  Finds low‑cap, high‑volume momentum stocks pre‑market & RTH           ║
+// ║  PULSETRADER v19.4 — VOLUME SPIKE HUNTER (ALPACA PRIMARY)              ║
+// ║  Finds low‑cap, high‑volume momentum stocks during market hours        ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
 
 import express from "express";
@@ -50,7 +50,7 @@ button{width:100%;background:#00ff88;color:#020508;border:none;border-radius:8px
 button:active{opacity:.8}
 .err{color:#ff3355;font-size:11px;text-align:center;margin-top:8px;letter-spacing:1px;min-height:14px}
 </style></head><body>
-<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v19.3</div></div>
+<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v19.4</div></div>
 <div class="box"><form method="POST" action="/login">
 <input type="password" name="passcode" maxlength="20" placeholder="••••••••" autocomplete="off" autofocus>
 <button type="submit">ENTER</button>
@@ -105,7 +105,7 @@ let preMarketWatchlist = [];
 let preSpikeWatchlist  = [];
 
 // ════════════════════════════════════════════════════════════════════════════
-// API HELPERS (FIXED)
+// API HELPERS
 // ════════════════════════════════════════════════════════════════════════════
 const supabase = async (path,opts={}) => {
   try {
@@ -128,7 +128,6 @@ const alpaca = async (path) => {
   } catch(_){return {};}
 };
 
-// FIXED FINNHUB HELPER – robust error handling
 const finnhub = async (path) => {
   const apiKey = process.env.FINNHUB_KEY;
   if (!apiKey) {
@@ -179,7 +178,7 @@ const groq = async (msgs, maxTokens=700) => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// TRADEZERO API (unchanged)
+// TRADEZERO API
 // ════════════════════════════════════════════════════════════════════════════
 const TZ = () => (process.env.TZ_API_URL||"https://webapi.tradezero.com").replace(/\/$/,"");
 const ACC = () => process.env.TZ_ACCOUNT_ID||"";
@@ -416,7 +415,7 @@ const loadPatterns = async () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// PRE-SPIKE SCANNER (unchanged)
+// PRE-SPIKE SCANNER
 // ════════════════════════════════════════════════════════════════════════════
 const scanPreSpike = async () => {
   const candidates = [];
@@ -459,7 +458,7 @@ const scanPreSpike = async () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// SCANNER – dynamic thresholds with robust Finnhub + Alpaca fallback
+// DYNAMIC THRESHOLDS
 // ════════════════════════════════════════════════════════════════════════════
 const getDynamicThresholds = () => {
   const et = new Date(new Date().toLocaleString("en-US",{timeZone:"America/New_York"}));
@@ -472,78 +471,90 @@ const getDynamicThresholds = () => {
   };
 };
 
+// ════════════════════════════════════════════════════════════════════════════
+// ⭐ FIXED SCANNER – ALPACA PRIMARY DURING MARKET HOURS
+// ════════════════════════════════════════════════════════════════════════════
 const scanForSpikes = async () => {
   const gainers = [];
   const { minGain, minVol } = getDynamicThresholds();
   console.log(`🔍 Scanning with minGain=${minGain}% minVol=${minVol.toLocaleString()}`);
 
-  // Source 1: Finnhub top gainers (with proper error handling)
+  const et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const currentMinutes = et.getHours() * 60 + et.getMinutes();
+  const isRTH = currentMinutes >= 570 && currentMinutes < 960; // 9:30 AM to 4:00 PM ET
+
+  // ---- PRIMARY DURING RTH: Alpaca (reliable) ----
+  if (isRTH) {
+    try {
+      const d = await alpaca("/v1beta1/screener/stocks/movers?by=percent_change&top=100");
+      const list = d.gainers || [];
+      console.log(`📡 Alpaca returned ${list.length} gainers (RTH primary)`);
+      for (const g of list) {
+        if (g.price >= CONFIG.MIN_PRICE && g.price <= CONFIG.MAX_PRICE &&
+            g.percent_change >= minGain && (g.volume || 0) >= minVol &&
+            !gainers.find(x => x.symbol === g.symbol)) {
+          gainers.push({
+            symbol: g.symbol,
+            price: g.price,
+            pct: g.percent_change,
+            vol: g.volume || 0,
+            src: "alpaca"
+          });
+        }
+      }
+    } catch (e) {
+      console.log("Alpaca error:", e.message);
+    }
+  }
+
+  // ---- SECONDARY: Finnhub (works pre‑market if key valid) ----
   try {
     const fh = await finnhub("/stock/market/gainers?exchange=US");
     const list = Array.isArray(fh) ? fh : (fh.gainers || []);
-    console.log(`📡 Finnhub returned ${list.length} gainers`);
+    if (list.length) console.log(`📡 Finnhub returned ${list.length} gainers`);
     for (const g of list) {
       const sym = (g.symbol || g.ticker || "").toUpperCase();
       const price = parseFloat(g.lastPrice || g.price || 0);
       const pct = parseFloat(g.change || g.changePercent || g.dp || 0);
       const vol = parseInt(g.volume || g.v || 0);
       if (sym && price >= CONFIG.MIN_PRICE && price <= CONFIG.MAX_PRICE &&
-          pct >= minGain && vol >= minVol && !gainers.find(x=>x.symbol===sym)) {
+          pct >= minGain && vol >= minVol && !gainers.find(x => x.symbol === sym)) {
         gainers.push({ symbol: sym, price, pct, vol, src: "finnhub" });
       }
     }
-  } catch(e) { console.log("Finnhub gainers error:", e.message); }
+  } catch (e) {
+    console.log("Finnhub gainers error:", e.message);
+  }
 
-  // Source 2: Pre‑market watchlist
+  // ---- WATCHLISTS (always check, low priority) ----
   for (const w of preMarketWatchlist) {
     try {
       const q = await finnhub(`/quote?symbol=${w}`);
       const price = parseFloat(q.c || 0);
       const pct = parseFloat(q.dp || 0);
       const vol = parseInt(q.v || 0);
-      if (price > 0 && pct >= minGain && vol >= minVol && !gainers.find(x=>x.symbol===w))
+      if (price > 0 && pct >= minGain && vol >= minVol && !gainers.find(x => x.symbol === w))
         gainers.push({ symbol: w, price, pct, vol, src: "watchlist" });
-    } catch(e) {}
+    } catch (e) {}
   }
 
-  // Source 3: Pre‑spike watchlist
   for (const w of preSpikeWatchlist) {
     try {
       const q = await finnhub(`/quote?symbol=${w.symbol}`);
       const price = parseFloat(q.c || 0);
       const pct = parseFloat(q.dp || 0);
       const vol = parseInt(q.v || 0);
-      if (price > 0 && price <= CONFIG.MAX_PRICE && pct >= minGain && vol >= minVol && !gainers.find(x=>x.symbol===w.symbol))
+      if (price > 0 && price <= CONFIG.MAX_PRICE && pct >= minGain && vol >= minVol && !gainers.find(x => x.symbol === w.symbol))
         gainers.push({ symbol: w.symbol, price, pct, vol, src: "prescan" });
-    } catch(e) {}
-  }
-
-  // Source 4: Alpaca screener (works during RTH; also fallback if Finnhub gave nothing)
-  if (gainers.length === 0) {
-    const et = new Date(new Date().toLocaleString("en-US",{timeZone:"America/New_York"}));
-    const hour = et.getHours();
-    if (hour >= 9.5 && hour < 16) {
-      try {
-        const d = await alpaca("/v1beta1/screener/stocks/movers?by=percent_change&top=100");
-        const list = d.gainers || [];
-        console.log(`📡 Alpaca returned ${list.length} gainers (fallback)`);
-        for (const g of list) {
-          if (g.price >= CONFIG.MIN_PRICE && g.price <= CONFIG.MAX_PRICE &&
-              g.percent_change >= minGain && (g.volume||0) >= minVol &&
-              !gainers.find(x=>x.symbol===g.symbol)) {
-            gainers.push({ symbol: g.symbol, price: g.price, pct: g.percent_change, vol: g.volume||0, src: "alpaca" });
-          }
-        }
-      } catch(e) { console.log("Alpaca fallback error:", e.message); }
-    }
+    } catch (e) {}
   }
 
   if (gainers.length === 0) {
     console.log("📭 No spikes found – try again in a few minutes");
   } else {
-    console.log(`🔥 Found ${gainers.length} spikes: ${gainers.slice(0,3).map(g=>`${g.symbol}+${g.pct.toFixed(0)}%`).join(", ")}`);
+    console.log(`🔥 Found ${gainers.length} spikes: ${gainers.slice(0, 3).map(g => `${g.symbol}+${g.pct.toFixed(0)}%`).join(", ")}`);
   }
-  return gainers.sort((a,b)=>b.vol - a.vol);
+  return gainers.sort((a, b) => b.vol - a.vol);
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -761,7 +772,7 @@ const autoTrade = async () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// SCHEDULER (unchanged)
+// SCHEDULER
 // ════════════════════════════════════════════════════════════════════════════
 const getInterval = () => {
   const et=new Date(new Date().toLocaleString("en-US",{timeZone:"America/New_York"}));
@@ -777,7 +788,7 @@ const getInterval = () => {
 const startAutoTrader = () => {
   if(autoTraderActive) return;
   autoTraderActive=true;
-  console.log("🤖 PulseTrader v19.3 STARTED — Volume Spike Hunter");
+  console.log("🤖 PulseTrader v19.4 STARTED — Volume Spike Hunter (Alpaca Primary)");
   const run=async()=>{
     await autoTrade();
     if(autoTraderActive) scanTimer=setTimeout(run,getInterval());
@@ -817,7 +828,7 @@ const startup = async () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// CHAT (simplified – keep your original if needed)
+// CHAT (simplified)
 // ════════════════════════════════════════════════════════════════════════════
 app.post("/api/chat", async (req, res) => {
   res.json({ reply: "Chat ready" });
@@ -845,7 +856,7 @@ app.post("/api/autotrader/sellall",async(_,res)=>{
 app.get("/api/autotrader/status",async(_,res)=>{
   const[acc,pos]=await Promise.all([tzAccount().catch(()=>null),tzPositions().catch(()=>[])]);
   res.json({
-    active:autoTraderActive,last_scan:lastScanTime,version:"19.3.0",
+    active:autoTraderActive,last_scan:lastScanTime,version:"19.4.0",
     equity:acc?.equity?.toFixed(2),cash:acc?.cash?.toFixed(2),pnl:acc?.pnl?.toFixed(2),
     positions:pos.length,max_positions:CONFIG.MAX_POSITIONS,
     open_trades:Object.keys(openTrades),
@@ -956,7 +967,7 @@ app.get("/api/news",async(req,res)=>{
   }catch(e){res.status(500).json({error:e.message});}
 });
 app.get("/health",(_,res)=>res.json({
-  status:"ok",version:"19.3.0",
+  status:"ok",version:"19.4.0",
   active:autoTraderActive,
   positions:Object.keys(openTrades).length,
   patterns:{winners:PATTERNS.winners.length,losers:PATTERNS.losers.length},
@@ -968,7 +979,7 @@ app.get("/health",(_,res)=>res.json({
 // ════════════════════════════════════════════════════════════════════════════
 const PORT=process.env.PORT||3001;
 app.listen(PORT,async()=>{
-  console.log(`⚡ PulseTrader v19.3 — Volume Spike Hunter (FINNHUB FIXED)`);
+  console.log(`⚡ PulseTrader v19.4 — Volume Spike Hunter (ALPACA PRIMARY)`);
   console.log(`   Targets: JZ +325% | HKIT +350% | ABTS +115% | HUBC +97%`);
   console.log(`   Max positions: ${CONFIG.MAX_POSITIONS} | Stop: -${CONFIG.HARD_STOP_PCT}%`);
   console.log(`   Dynamic thresholds: pre‑market 3%/50k, RTH 10%/200k`);
