@@ -105,7 +105,7 @@ let preMarketWatchlist = [];
 let preSpikeWatchlist  = [];
 
 // ════════════════════════════════════════════════════════════════════════════
-// API HELPERS (Finnhub removed – no longer used)
+// API HELPERS
 // ════════════════════════════════════════════════════════════════════════════
 const supabase = async (path,opts={}) => {
   try {
@@ -128,11 +128,16 @@ const alpaca = async (path) => {
   } catch(_){return {};}
 };
 
-// Yahoo Finance: get market gainers (no API key needed)
+// Yahoo Finance: get market gainers (with proper headers and fallback)
 const yahooGainers = async () => {
   try {
     const url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrId=day_gainers&count=50";
-    const res = await fetch(url);
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json"
+      }
+    });
     const data = await res.json();
     const quotes = data.finance?.result?.[0]?.quotes || [];
     return quotes.map(q => ({
@@ -302,7 +307,7 @@ const tzOrder = async (symbol,side,qty,price) => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// CHART PATTERN RECOGNITION (unchanged, but uses alpaca for bars – can keep)
+// CHART PATTERN RECOGNITION (unchanged)
 // ════════════════════════════════════════════════════════════════════════════
 const analyzeChart = async (symbol) => {
   try {
@@ -482,7 +487,6 @@ const scanPreSpike = async () => {
 // DYNAMIC THRESHOLDS (simplified – use config values)
 // ════════════════════════════════════════════════════════════════════════════
 const getDynamicThresholds = () => {
-  // For simplicity, use fixed thresholds from CONFIG (already lowered for testing)
   return {
     minGain: CONFIG.MIN_GAIN_PCT,
     minVol:  CONFIG.MIN_VOL,
@@ -490,34 +494,47 @@ const getDynamicThresholds = () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// ⭐ FINAL SCANNER – USES YAHOO PRIMARY + ALPHA VANTAGE + ALPACA
+// ⭐ FIXED SCANNER – USES YAHOO WITH HEADERS + FALLBACK SYMBOLS
 // ════════════════════════════════════════════════════════════════════════════
 const scanForSpikes = async () => {
   const gainers = [];
   const { minGain, minVol } = getDynamicThresholds();
   console.log(`🔍 Scanning with minGain=${minGain}% minVol=${minVol.toLocaleString()}`);
 
-  // ----- SOURCE 1: Yahoo Finance (no API key, works reliably) -----
+  // ----- SOURCE 1: Yahoo Finance (with proper headers) -----
+  let yahooList = [];
   try {
-    const yahooList = await yahooGainers();
+    yahooList = await yahooGainers();
     console.log(`📡 Yahoo returned ${yahooList.length} gainers`);
-    for (const g of yahooList) {
-      if (g.symbol && g.price >= CONFIG.MIN_PRICE && g.price <= CONFIG.MAX_PRICE &&
-          g.pct >= minGain && g.vol >= minVol &&
-          !gainers.find(x => x.symbol === g.symbol)) {
-        gainers.push({
-          symbol: g.symbol,
-          price: g.price,
-          pct: g.pct,
-          vol: g.vol,
-          src: "yahoo"
-        });
-      }
-    }
   } catch(e) { console.log("Yahoo error:", e.message); }
 
+  // If Yahoo returns 0, try a hardcoded list of potential small‑cap runners
+  if (yahooList.length === 0) {
+    console.log("⚠️ Yahoo returned 0 – attempting fallback with popular small caps");
+    const fallbackSymbols = ["LASE", "PMI", "BJDX", "RKTO", "DEVS", "STAK", "DXST", "TELL", "KOLD", "BOIL"];
+    for (const sym of fallbackSymbols) {
+      try {
+        const quote = await yahooQuote(sym);
+        if (quote.c && quote.c >= CONFIG.MIN_PRICE && quote.c <= CONFIG.MAX_PRICE &&
+            quote.dp >= minGain && quote.v >= minVol) {
+          yahooList.push({ symbol: sym, price: quote.c, pct: quote.dp, vol: quote.v });
+        }
+      } catch(e) {}
+      await new Promise(r => setTimeout(r, 200));
+    }
+    console.log(`📡 Fallback symbols returned ${yahooList.length} gainers`);
+  }
+
+  for (const g of yahooList) {
+    if (g.symbol && g.price >= CONFIG.MIN_PRICE && g.price <= CONFIG.MAX_PRICE &&
+        g.pct >= minGain && g.vol >= minVol &&
+        !gainers.find(x => x.symbol === g.symbol)) {
+      gainers.push({ symbol: g.symbol, price: g.price, pct: g.pct, vol: g.vol, src: "yahoo" });
+    }
+  }
+
   // ----- SOURCE 2: Alpha Vantage (if key exists) -----
-  if (process.env.ALPHAVANTAGE_KEY) {
+  if (process.env.ALPHAVANTAGE_KEY && gainers.length < 5) {
     try {
       const url = `https://www.alphavantage.co/query?function=TOP_GAINERS_LOSERS&apikey=${process.env.ALPHAVANTAGE_KEY}`;
       const res = await fetch(url);
@@ -560,7 +577,7 @@ const scanForSpikes = async () => {
     } catch(e) { console.log("Alpaca error:", e.message); }
   }
 
-  // ----- SOURCE 4: Pre‑spike watchlist (using Yahoo quotes) -----
+  // ----- SOURCE 4: Pre‑spike watchlist -----
   for (const w of preSpikeWatchlist) {
     try {
       const quote = await yahooQuote(w.symbol);
@@ -595,7 +612,7 @@ const scanForSpikes = async () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// POSITION MANAGER (uses Yahoo for live prices)
+// POSITION MANAGER (unchanged)
 // ════════════════════════════════════════════════════════════════════════════
 const managePositions = async (tzPos) => {
   for(const pos of tzPos){
@@ -687,7 +704,7 @@ const managePositions = async (tzPos) => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// AUTO TRADER (updated to use Yahoo for quotes, no Finnhub)
+// AUTO TRADER (unchanged)
 // ════════════════════════════════════════════════════════════════════════════
 const autoTrade = async () => {
   lastScanTime=new Date().toISOString();
@@ -763,7 +780,6 @@ const autoTrade = async () => {
     const slotsLeft=CONFIG.MAX_POSITIONS-longPos.length;
     const scored=[];
     for(const stock of candidates.slice(0,6)){
-      // Use Yahoo for market cap
       let mktCapM = 0;
       try {
         const cap = await yahooMarketCap(stock.symbol);
@@ -875,7 +891,7 @@ app.post("/api/chat", async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// ROUTES (all updated to use Yahoo where Finnhub was used)
+// ROUTES (all unchanged, using Yahoo)
 // ════════════════════════════════════════════════════════════════════════════
 app.post("/api/autotrader/start",(_,res)=>{startAutoTrader();res.json({status:"started"});});
 app.get( "/api/autotrader/start",(_,res)=>{startAutoTrader();res.json({status:"started"});});
@@ -1000,7 +1016,6 @@ app.get("/api/debug/positions",async(_,res)=>{
   catch(e){res.status(500).json({error:e.message});}
 });
 app.get("/api/news",async(req,res)=>{
-  // News endpoint removed (not critical)
   res.json([]);
 });
 app.get("/health",(_,res)=>res.json({
