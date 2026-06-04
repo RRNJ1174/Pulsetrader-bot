@@ -1,5 +1,5 @@
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  PULSETRADER v20.1 — MULTI‑SOURCE WITH FALLBACK SYMBOLS                ║
+// ║  PULSETRADER v20.2 — MULTI‑SOURCE WITH FALLBACK SYMBOLS & SELL FIX      ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
 
 import express from "express";
@@ -49,7 +49,7 @@ button{width:100%;background:#00ff88;color:#020508;border:none;border-radius:8px
 button:active{opacity:.8}
 .err{color:#ff3355;font-size:11px;text-align:center;margin-top:8px;letter-spacing:1px;min-height:14px}
 </style></head><body>
-<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v20.1</div></div>
+<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v20.2</div></div>
 <div class="box"><form method="POST" action="/login">
 <input type="password" name="passcode" maxlength="20" placeholder="••••••••" autocomplete="off" autofocus>
 <button type="submit">ENTER</button>
@@ -218,7 +218,7 @@ const groq = async (msgs, maxTokens=700) => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// TRADEZERO API (fixed JSON parsing)
+// TRADEZERO API (fixed JSON parsing AND sell order fix)
 // ════════════════════════════════════════════════════════════════════════════
 const TZ = () => (process.env.TZ_API_URL||"https://webapi.tradezero.com").replace(/\/$/,"");
 const ACC = () => process.env.TZ_ACCOUNT_ID||"";
@@ -229,7 +229,6 @@ const tzAPI = async (method,path,body=null) => {
     if(body) opts.body=JSON.stringify(body);
     const r=await fetch(`${TZ()}${path}`,opts);
     const t=await r.text();
-    // Try to parse JSON, but if it fails, return an error object
     try {
       return JSON.parse(t);
     } catch(e) {
@@ -305,29 +304,40 @@ const tzPositions = async () => {
   } catch(e){console.log("tzPositions:",e.message);return [];}
 };
 
-const tzOrder = async (symbol,side,qty,price) => {
-  if(!qty||qty<1||!price||price<=0) return {success:false,error:"invalid"};
-  const tzSide = side==="Buy" ? "Buy" : "Sell";
-  const isBuy = tzSide==="Buy";
-  const lp=isBuy?parseFloat((price*1.002).toFixed(4)):parseFloat((price*0.998).toFixed(4));
-  const body={
-    clientOrderId:`PT-${Date.now()}-${Math.random().toString(36).slice(2,6).toUpperCase()}`,
-    symbol:symbol.toUpperCase(),securityType:"Stock",
-    side:tzSide,orderType:isBuy?"Limit":"Market",
-    limitPrice:lp,price:lp,traderAction:tzSide,
-    quantity:Math.floor(qty),orderQuantity:Math.floor(qty),
-    timeInForce:"Day",route:isBuy?"SMART":"TRAFIX_SIM",
+// ⭐ FIXED tzOrder – sells use Market orders with limitPrice=0
+const tzOrder = async (symbol, side, qty, price) => {
+  if (!qty || qty < 1 || !price || price <= 0) return { success: false, error: "invalid" };
+  const tzSide = side === "Buy" ? "Buy" : "Sell";
+  const isBuy = tzSide === "Buy";
+  // For sells: use Market order with limitPrice = 0
+  const orderType = isBuy ? "Limit" : "Market";
+  const limitPrice = isBuy ? parseFloat((price * 1.002).toFixed(4)) : 0;
+  const body = {
+    clientOrderId: `PT-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+    symbol: symbol.toUpperCase(),
+    securityType: "Stock",
+    side: tzSide,
+    orderType: orderType,
+    limitPrice: limitPrice,
+    price: limitPrice,
+    traderAction: tzSide,
+    quantity: Math.floor(qty),
+    orderQuantity: Math.floor(qty),
+    timeInForce: "Day",
+    route: isBuy ? "SMART" : "TRAFIX_SIM",
   };
   try {
-    const d=await tzAPI("POST",`/v1/api/accounts/${ACC()}/order`,body);
+    const d = await tzAPI("POST", `/v1/api/accounts/${ACC()}/order`, body);
     if (d.error || d.raw) {
       console.log(`TZ order failed: ${JSON.stringify(d)}`);
-      return {success:false, status:d.error || "API error"};
+      return { success: false, status: d.error || "API error" };
     }
-    console.log(`TZ ${side} ${symbol} x${qty} @${lp}:`,JSON.stringify(d).slice(0,120));
-    const ok=!["Rejected","Canceled","Expired"].includes(d.orderStatus)&&!!d.orderStatus;
-    return {success:ok,status:d.orderStatus,data:d};
-  } catch(e){return {success:false,error:e.message};}
+    console.log(`TZ ${side} ${symbol} x${qty} @${limitPrice || "market"}:`, JSON.stringify(d).slice(0, 120));
+    const ok = !["Rejected", "Canceled", "Expired"].includes(d.orderStatus) && !!d.orderStatus;
+    return { success: ok, status: d.orderStatus, data: d };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -594,7 +604,7 @@ const scanForSpikes = async () => {
     } catch(e) { console.log("Alpaca error:", e.message); }
   }
 
-  // ----- SOURCE 5: HARDCODED FALLBACK LIST (same as before, works) -----
+  // ----- SOURCE 5: HARDCODED FALLBACK LIST (works when APIs fail) -----
   if (gainers.length === 0) {
     console.log("⚠️ All APIs returned 0 – attempting fallback with popular small caps");
     const fallbackSymbols = ["LASE", "PMI", "BJDX", "RKTO", "DEVS", "STAK", "DXST", "TELL", "KOLD", "BOIL"];
@@ -890,7 +900,7 @@ const getInterval = () => {
 const startAutoTrader = () => {
   if(autoTraderActive) return;
   autoTraderActive=true;
-  console.log("🤖 PulseTrader v20.1 STARTED — Multi‑Source + Fallback");
+  console.log("🤖 PulseTrader v20.2 STARTED — Multi‑Source + Fallback + Sell Fix");
   const run=async()=>{
     await autoTrade();
     if(autoTraderActive) scanTimer=setTimeout(run,getInterval());
@@ -958,7 +968,7 @@ app.post("/api/autotrader/sellall",async(_,res)=>{
 app.get("/api/autotrader/status",async(_,res)=>{
   const[acc,pos]=await Promise.all([tzAccount().catch(()=>null),tzPositions().catch(()=>[])]);
   res.json({
-    active:autoTraderActive,last_scan:lastScanTime,version:"20.1.0",
+    active:autoTraderActive,last_scan:lastScanTime,version:"20.2.0",
     equity:acc?.equity?.toFixed(2),cash:acc?.cash?.toFixed(2),pnl:acc?.pnl?.toFixed(2),
     positions:pos.length,max_positions:CONFIG.MAX_POSITIONS,
     open_trades:Object.keys(openTrades),
@@ -1065,7 +1075,7 @@ app.get("/api/news",async(req,res)=>{
   res.json([]);
 });
 app.get("/health",(_,res)=>res.json({
-  status:"ok",version:"20.1.0",
+  status:"ok",version:"20.2.0",
   active:autoTraderActive,
   positions:Object.keys(openTrades).length,
   patterns:{winners:PATTERNS.winners.length,losers:PATTERNS.losers.length},
@@ -1077,7 +1087,7 @@ app.get("/health",(_,res)=>res.json({
 // ════════════════════════════════════════════════════════════════════════════
 const PORT=process.env.PORT||3001;
 app.listen(PORT,async()=>{
-  console.log(`⚡ PulseTrader v20.1 — Multi‑Source Scanner + Fallback Symbols`);
+  console.log(`⚡ PulseTrader v20.2 — Multi‑Source Scanner + Fallback + Sell Fix`);
   console.log(`   Targets: JZ +325% | HKIT +350% | ABTS +115% | HUBC +97%`);
   console.log(`   Max positions: ${CONFIG.MAX_POSITIONS} | Stop: -${CONFIG.HARD_STOP_PCT}%`);
   console.log(`   Sources: Twelve Data, Yahoo, Alpha Vantage, Alpaca, Fallback List`);
