@@ -1,5 +1,5 @@
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  PULSETRADER v20.4 — MULTI‑SOURCE SCANNER (FINVIZ PRIMARY)             ║
+// ║  PULSETRADER v20.5 — MULTI‑SOURCE SCANNER (FINVIZ PRIMARY)             ║
 // ║  Finds low‑cap, high‑volume momentum stocks using all available data   ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
 
@@ -50,7 +50,7 @@ button{width:100%;background:#00ff88;color:#020508;border:none;border-radius:8px
 button:active{opacity:.8}
 .err{color:#ff3355;font-size:11px;text-align:center;margin-top:8px;letter-spacing:1px;min-height:14px}
 </style></head><body>
-<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v20.4</div></div>
+<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v20.5</div></div>
 <div class="box"><form method="POST" action="/login">
 <input type="password" name="passcode" maxlength="20" placeholder="••••••••" autocomplete="off" autofocus>
 <button type="submit">ENTER</button>
@@ -83,7 +83,7 @@ const CONFIG = {
   TRAIL_PCT:          12,
   MIN_GAIN_PCT:       5,
   MIN_VOL:            100000,
-  MAX_ENTRY_GAIN_PCT: 30,
+  MAX_ENTRY_GAIN_PCT: 100,   // Changed from 30 to 100 to allow high gainers
   CASH_PCT:           0.18,
   MAX_CASH_PER_TRADE: 40000,
   MIN_PRICE:          0.10,
@@ -108,7 +108,7 @@ let preMarketWatchlist = [];
 let preSpikeWatchlist  = [];
 
 // ════════════════════════════════════════════════════════════════════════════
-// API HELPERS
+// API HELPERS (unchanged)
 // ════════════════════════════════════════════════════════════════════════════
 const supabase = async (path,opts={}) => {
   try {
@@ -216,7 +216,7 @@ const groq = async (msgs, maxTokens=700) => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// TRADEZERO API (fixed JSON parsing)
+// TRADEZERO API (unchanged)
 // ════════════════════════════════════════════════════════════════════════════
 const TZ = () => (process.env.TZ_API_URL||"https://webapi.tradezero.com").replace(/\/$/,"");
 const ACC = () => process.env.TZ_ACCOUNT_ID||"";
@@ -339,7 +339,7 @@ const tzOrder = async (symbol, side, qty, price) => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// CHART PATTERN (uses alpaca bars)
+// CHART PATTERN (uses alpaca bars) – lowered patternScore threshold to 5
 // ════════════════════════════════════════════════════════════════════════════
 const analyzeChart = async (symbol) => {
   try {
@@ -516,7 +516,7 @@ const scanPreSpike = async () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// DYNAMIC THRESHOLDS
+// DYNAMIC THRESHOLDS (unchanged)
 // ════════════════════════════════════════════════════════════════════════════
 const getDynamicThresholds = () => {
   const et = new Date(new Date().toLocaleString("en-US",{timeZone:"America/New_York"}));
@@ -530,14 +530,14 @@ const getDynamicThresholds = () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// ⭐ FINAL SCANNER – FINVIZ PRIMARY + ALL OTHER APIs + BROAD WATCHLIST
+// ⭐ SCANNER – identical to v20.4 (Finviz + APIs + broad watchlist)
 // ════════════════════════════════════════════════════════════════════════════
 const scanForSpikes = async () => {
   const gainers = [];
   const { minGain, minVol } = getDynamicThresholds();
   console.log(`🔍 Scanning with minGain=${minGain}% minVol=${minVol.toLocaleString()}`);
 
-  // ----- SOURCE 0: Finviz top gainers (free, no key, works pre-market) -----
+  // ----- SOURCE 0: Finviz top gainers -----
   let finvizList = [];
   try {
     const url = "https://finviz.com/screener.ashx?v=111&ft=4";
@@ -695,7 +695,7 @@ const scanForSpikes = async () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// POSITION MANAGER (uses Yahoo for live prices)
+// POSITION MANAGER (unchanged)
 // ════════════════════════════════════════════════════════════════════════════
 const managePositions = async (tzPos) => {
   for(const pos of tzPos){
@@ -789,7 +789,7 @@ const managePositions = async (tzPos) => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// AUTO TRADER
+// AUTO TRADER – with lower pattern thresholds (5 instead of 15, finalScore 5)
 // ════════════════════════════════════════════════════════════════════════════
 const autoTrade = async () => {
   lastScanTime=new Date().toISOString();
@@ -885,7 +885,8 @@ const autoTrade = async () => {
         continue;
       }
       const chart=await analyzeChart(stock.symbol);
-      if(chart.patternScore<15&&chart.relVol<3) continue;
+      // Lowered patternScore threshold from 15 to 5
+      if(chart.patternScore<5&&chart.relVol<2) continue;
       console.log(`  📊 ${stock.symbol}: +${stock.pct?.toFixed(0)}% | vol:${(stock.vol/1e6).toFixed(1)}M | relVol:${chart.relVol}x | score:${chart.patternScore}`);
       scored.push({...stock, mktCapM, chart, finalScore: chart.patternScore});
       await new Promise(r=>setTimeout(r,200));
@@ -894,7 +895,8 @@ const autoTrade = async () => {
     scored.sort((a,b)=>b.finalScore-a.finalScore);
 
     for(const stock of scored.slice(0,slotsLeft)){
-      if(stock.finalScore<10) continue;
+      // Lowered finalScore threshold from 10 to 5
+      if(stock.finalScore<5) continue;
       const price = stock.price;
       if(!price||price<=0||price<CONFIG.MIN_PRICE||price>CONFIG.MAX_PRICE) continue;
       const maxDollars=Math.min(acc.cash*CONFIG.CASH_PCT, CONFIG.MAX_CASH_PER_TRADE);
@@ -924,7 +926,7 @@ const autoTrade = async () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// SCHEDULER
+// SCHEDULER (unchanged)
 // ════════════════════════════════════════════════════════════════════════════
 const getInterval = () => {
   const et=new Date(new Date().toLocaleString("en-US",{timeZone:"America/New_York"}));
@@ -940,7 +942,7 @@ const getInterval = () => {
 const startAutoTrader = () => {
   if(autoTraderActive) return;
   autoTraderActive=true;
-  console.log("🤖 PulseTrader v20.4 STARTED — Multi‑Source Scanner (Finviz Primary)");
+  console.log("🤖 PulseTrader v20.5 STARTED — Multi‑Source Scanner (Finviz Primary)");
   const run=async()=>{
     await autoTrade();
     if(autoTraderActive) scanTimer=setTimeout(run,getInterval());
@@ -980,7 +982,7 @@ const startup = async () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// CHAT – Full Command Support
+// CHAT – Full Command Support (unchanged)
 // ════════════════════════════════════════════════════════════════════════════
 app.post("/api/chat", async (req, res) => {
   const { messages } = req.body;
@@ -1142,7 +1144,7 @@ app.post("/api/autotrader/sellall",async(_,res)=>{
 app.get("/api/autotrader/status",async(_,res)=>{
   const[acc,pos]=await Promise.all([tzAccount().catch(()=>null),tzPositions().catch(()=>[])]);
   res.json({
-    active:autoTraderActive,last_scan:lastScanTime,version:"20.4.0",
+    active:autoTraderActive,last_scan:lastScanTime,version:"20.5.0",
     equity:acc?.equity?.toFixed(2),cash:acc?.cash?.toFixed(2),pnl:acc?.pnl?.toFixed(2),
     positions:pos.length,max_positions:CONFIG.MAX_POSITIONS,
     open_trades:Object.keys(openTrades),
@@ -1249,7 +1251,7 @@ app.get("/api/news",async(req,res)=>{
   res.json([]);
 });
 app.get("/health",(_,res)=>res.json({
-  status:"ok",version:"20.4.0",
+  status:"ok",version:"20.5.0",
   active:autoTraderActive,
   positions:Object.keys(openTrades).length,
   patterns:{winners:PATTERNS.winners.length,losers:PATTERNS.losers.length},
@@ -1261,7 +1263,7 @@ app.get("/health",(_,res)=>res.json({
 // ════════════════════════════════════════════════════════════════════════════
 const PORT=process.env.PORT||3001;
 app.listen(PORT,async()=>{
-  console.log(`⚡ PulseTrader v20.4 — Multi‑Source Scanner (Finviz Primary)`);
+  console.log(`⚡ PulseTrader v20.5 — Multi‑Source Scanner (Finviz Primary)`);
   console.log(`   Targets: JZ +325% | HKIT +350% | ABTS +115% | HUBC +97%`);
   console.log(`   Max positions: ${CONFIG.MAX_POSITIONS} | Stop: -${CONFIG.HARD_STOP_PCT}%`);
   console.log(`   Sources: Finviz, Twelve Data, Yahoo, Alpha Vantage, Alpaca, Watchlists`);
