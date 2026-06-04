@@ -1,6 +1,6 @@
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  PULSETRADER v19.6 — VOLUME SPIKE HUNTER (YAHOO PRIMARY)               ║
-// ║  Finds low‑cap, high‑volume momentum stocks using Yahoo Finance        ║
+// ║  PULSETRADER v20.0 — MULTI‑SOURCE VOLUME SPIKE HUNTER                  ║
+// ║  Uses Twelve Data (pre‑market), Yahoo, Alpha Vantage, Alpaca           ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
 
 import express from "express";
@@ -50,7 +50,7 @@ button{width:100%;background:#00ff88;color:#020508;border:none;border-radius:8px
 button:active{opacity:.8}
 .err{color:#ff3355;font-size:11px;text-align:center;margin-top:8px;letter-spacing:1px;min-height:14px}
 </style></head><body>
-<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v19.6</div></div>
+<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v20.0</div></div>
 <div class="box"><form method="POST" action="/login">
 <input type="password" name="passcode" maxlength="20" placeholder="••••••••" autocomplete="off" autofocus>
 <button type="submit">ENTER</button>
@@ -73,7 +73,7 @@ app.get("/api/ping",(_,res)=>res.json({ok:true}));
 app.use("/api",requireAuth);
 
 // ════════════════════════════════════════════════════════════════════════════
-// CONFIG (lowered thresholds for testing; adjust as needed)
+// CONFIG (adjust thresholds as needed)
 // ════════════════════════════════════════════════════════════════════════════
 const CONFIG = {
   MAX_POSITIONS:      8,
@@ -81,13 +81,15 @@ const CONFIG = {
   FIRST_TARGET_PCT:   30,
   SECOND_TARGET_PCT:  75,
   TRAIL_PCT:          12,
-  MIN_GAIN_PCT:       3,      // lowered for testing – change back to 10 later
-  MIN_VOL:            50000,   // lowered for testing
+  MIN_GAIN_PCT:       5,       // will be lowered pre‑market dynamically
+  MIN_VOL:            100000,  // will be lowered pre‑market
+  MAX_ENTRY_GAIN_PCT: 30,      // don't buy if already up >30% intraday
   CASH_PCT:           0.18,
   MAX_CASH_PER_TRADE: 40000,
   MIN_PRICE:          0.10,
   MAX_PRICE:          20,
   MAX_MKTCAP_M:       500,
+  COOLDOWN_MINUTES:   5,       // prevent duplicate buys of same symbol
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -96,6 +98,7 @@ const CONFIG = {
 const openTrades  = {};
 const tradeLog    = [];
 const chatMemory  = [];
+const lastBuyTime = {};  // symbol -> timestamp
 const PATTERNS = { winners: [], losers: [], stats: { byFloat: {}, byGap: {}, byVol: {}, byHour: {} } };
 let autoTraderActive = false;
 let scanTimer = null;
@@ -128,7 +131,28 @@ const alpaca = async (path) => {
   } catch(_){return {};}
 };
 
-// Yahoo Finance: get market gainers (with proper headers and fallback)
+// ----- Twelve Data API (pre‑market movers) -----
+const twelveDataGainers = async () => {
+  if (!process.env.TWELVEDATA_API_KEY) return [];
+  try {
+    const url = `https://api.twelvedata.com/market_movers?type=stocks&mover=top_gainers&apikey=${process.env.TWELVEDATA_API_KEY}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data.data || !Array.isArray(data.data)) return [];
+    return data.data.map(item => ({
+      symbol: item.symbol,
+      price: parseFloat(item.price),
+      pct: parseFloat(item.percent_change),
+      vol: parseInt(item.volume) || 0,
+      src: "twelvedata"
+    }));
+  } catch(e) {
+    console.log("Twelve Data error:", e.message);
+    return [];
+  }
+};
+
+// ----- Yahoo Finance gainers (with headers) -----
 const yahooGainers = async () => {
   try {
     const url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrId=day_gainers&count=50";
@@ -144,15 +168,13 @@ const yahooGainers = async () => {
       symbol: q.symbol,
       price: q.regularMarketPrice,
       pct: q.regularMarketChangePercent,
-      vol: q.regularMarketVolume
+      vol: q.regularMarketVolume,
+      src: "yahoo"
     }));
-  } catch(e) {
-    console.log("Yahoo gainers error:", e.message);
-    return [];
-  }
+  } catch(e) { return []; }
 };
 
-// Yahoo Finance: get single quote (no API key)
+// ----- Yahoo single quote & market cap -----
 const yahooQuote = async (symbol) => {
   try {
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}`;
@@ -163,26 +185,17 @@ const yahooQuote = async (symbol) => {
       return {
         c: meta.regularMarketPrice,
         dp: ((meta.regularMarketPrice - meta.previousClose) / meta.previousClose) * 100,
-        v: meta.regularMarketVolume
+        v: meta.regularMarketVolume,
+        marketCap: meta.marketCap || 0
       };
     }
     return {};
-  } catch(e) {
-    return {};
-  }
+  } catch(e) { return {}; }
 };
 
-// Yahoo Finance: get market cap (no API key)
 const yahooMarketCap = async (symbol) => {
-  try {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}`;
-    const res = await fetch(url);
-    const data = await res.json();
-    const marketCap = data.chart?.result?.[0]?.meta?.marketCap || 0;
-    return marketCap;
-  } catch(e) {
-    return 0;
-  }
+  const quote = await yahooQuote(symbol);
+  return quote.marketCap || 0;
 };
 
 const groq = async (msgs, maxTokens=700) => {
@@ -307,7 +320,7 @@ const tzOrder = async (symbol,side,qty,price) => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// CHART PATTERN RECOGNITION (unchanged)
+// CHART PATTERN RECOGNITION (uses Alpaca bars – unchanged)
 // ════════════════════════════════════════════════════════════════════════════
 const analyzeChart = async (symbol) => {
   try {
@@ -420,7 +433,7 @@ const getPatternBonus = (relVol, volAccel) => {
 const savePatterns = async () => {
   try {
     await supabase("bot_watchlist",{method:"POST",body:JSON.stringify({
-      label:"patterns_v18",
+      label:"patterns_v20",
       tickers:JSON.stringify({winners:PATTERNS.winners.slice(0,50),losers:PATTERNS.losers.slice(0,50),stats:PATTERNS.stats}).slice(0,90000),
       ts:new Date().toISOString()
     })});
@@ -429,7 +442,7 @@ const savePatterns = async () => {
 
 const loadPatterns = async () => {
   try {
-    const d=await supabase("bot_watchlist?label=eq.patterns_v18&order=created_at.desc&limit=1");
+    const d=await supabase("bot_watchlist?label=eq.patterns_v20&order=created_at.desc&limit=1");
     if(Array.isArray(d)&&d[0]?.tickers){
       const s=JSON.parse(d[0].tickers);
       PATTERNS.winners=s.winners||[];
@@ -484,56 +497,58 @@ const scanPreSpike = async () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// DYNAMIC THRESHOLDS (simplified – use config values)
+// DYNAMIC THRESHOLDS (pre‑market vs regular)
 // ════════════════════════════════════════════════════════════════════════════
 const getDynamicThresholds = () => {
+  const et = new Date(new Date().toLocaleString("en-US",{timeZone:"America/New_York"}));
+  const hour = et.getHours() + et.getMinutes()/60;
+  const isPre = hour >= 4 && hour < 9.5;
+  const isPost = hour >= 16 && hour < 20;
   return {
-    minGain: CONFIG.MIN_GAIN_PCT,
-    minVol:  CONFIG.MIN_VOL,
+    minGain: isPre ? 3 : (isPost ? 5 : CONFIG.MIN_GAIN_PCT),
+    minVol:  isPre ? 50000 : (isPost ? 100000 : CONFIG.MIN_VOL),
   };
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// ⭐ FIXED SCANNER – USES YAHOO WITH HEADERS + FALLBACK SYMBOLS
+// ⭐ FINAL SCANNER – USES ALL SOURCES (Twelve Data primary)
 // ════════════════════════════════════════════════════════════════════════════
 const scanForSpikes = async () => {
   const gainers = [];
   const { minGain, minVol } = getDynamicThresholds();
   console.log(`🔍 Scanning with minGain=${minGain}% minVol=${minVol.toLocaleString()}`);
 
-  // ----- SOURCE 1: Yahoo Finance (with proper headers) -----
-  let yahooList = [];
+  // ----- SOURCE 1: Twelve Data (best for pre‑market) -----
+  let twelveList = [];
   try {
-    yahooList = await yahooGainers();
-    console.log(`📡 Yahoo returned ${yahooList.length} gainers`);
-  } catch(e) { console.log("Yahoo error:", e.message); }
+    twelveList = await twelveDataGainers();
+    console.log(`📡 Twelve Data returned ${twelveList.length} gainers`);
+  } catch(e) { console.log("Twelve Data error:", e.message); }
 
-  // If Yahoo returns 0, try a hardcoded list of potential small‑cap runners
-  if (yahooList.length === 0) {
-    console.log("⚠️ Yahoo returned 0 – attempting fallback with popular small caps");
-    const fallbackSymbols = ["LASE", "PMI", "BJDX", "RKTO", "DEVS", "STAK", "DXST", "TELL", "KOLD", "BOIL"];
-    for (const sym of fallbackSymbols) {
-      try {
-        const quote = await yahooQuote(sym);
-        if (quote.c && quote.c >= CONFIG.MIN_PRICE && quote.c <= CONFIG.MAX_PRICE &&
-            quote.dp >= minGain && quote.v >= minVol) {
-          yahooList.push({ symbol: sym, price: quote.c, pct: quote.dp, vol: quote.v });
-        }
-      } catch(e) {}
-      await new Promise(r => setTimeout(r, 200));
-    }
-    console.log(`📡 Fallback symbols returned ${yahooList.length} gainers`);
-  }
-
-  for (const g of yahooList) {
+  for (const g of twelveList) {
     if (g.symbol && g.price >= CONFIG.MIN_PRICE && g.price <= CONFIG.MAX_PRICE &&
         g.pct >= minGain && g.vol >= minVol &&
         !gainers.find(x => x.symbol === g.symbol)) {
-      gainers.push({ symbol: g.symbol, price: g.price, pct: g.pct, vol: g.vol, src: "yahoo" });
+      gainers.push({ ...g, src: "twelvedata" });
     }
   }
 
-  // ----- SOURCE 2: Alpha Vantage (if key exists) -----
+  // ----- SOURCE 2: Yahoo Finance (if Twelve Data gave few results) -----
+  if (gainers.length < 5) {
+    try {
+      const yahooList = await yahooGainers();
+      console.log(`📡 Yahoo returned ${yahooList.length} gainers`);
+      for (const g of yahooList) {
+        if (g.symbol && g.price >= CONFIG.MIN_PRICE && g.price <= CONFIG.MAX_PRICE &&
+            g.pct >= minGain && g.vol >= minVol &&
+            !gainers.find(x => x.symbol === g.symbol)) {
+          gainers.push({ ...g, src: "yahoo" });
+        }
+      }
+    } catch(e) { console.log("Yahoo error:", e.message); }
+  }
+
+  // ----- SOURCE 3: Alpha Vantage (if key exists) -----
   if (process.env.ALPHAVANTAGE_KEY && gainers.length < 5) {
     try {
       const url = `https://www.alphavantage.co/query?function=TOP_GAINERS_LOSERS&apikey=${process.env.ALPHAVANTAGE_KEY}`;
@@ -555,7 +570,7 @@ const scanForSpikes = async () => {
     } catch(e) { console.log("Alpha Vantage error:", e.message); }
   }
 
-  // ----- SOURCE 3: Alpaca (fallback) -----
+  // ----- SOURCE 4: Alpaca (fallback) -----
   if (gainers.length < 3) {
     try {
       const d = await alpaca("/v1beta1/screener/stocks/movers?by=percent_change&top=100&market_type=sip");
@@ -577,7 +592,7 @@ const scanForSpikes = async () => {
     } catch(e) { console.log("Alpaca error:", e.message); }
   }
 
-  // ----- SOURCE 4: Pre‑spike watchlist -----
+  // ----- SOURCE 5: Pre‑spike watchlist (using Yahoo quotes) -----
   for (const w of preSpikeWatchlist) {
     try {
       const quote = await yahooQuote(w.symbol);
@@ -590,7 +605,7 @@ const scanForSpikes = async () => {
     await new Promise(r => setTimeout(r, 200));
   }
 
-  // ----- SOURCE 5: Pre‑market watchlist -----
+  // ----- SOURCE 6: Pre‑market watchlist (yesterday's movers) -----
   for (const w of preMarketWatchlist) {
     try {
       const quote = await yahooQuote(w);
@@ -612,7 +627,7 @@ const scanForSpikes = async () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// POSITION MANAGER (unchanged)
+// POSITION MANAGER (uses Yahoo for live prices)
 // ════════════════════════════════════════════════════════════════════════════
 const managePositions = async (tzPos) => {
   for(const pos of tzPos){
@@ -655,6 +670,7 @@ const managePositions = async (tzPos) => {
         tradeLog.unshift({type:"STOP",symbol:sym,qty,price:cur,pnlPct:pnlPct.toFixed(1),ts:new Date().toISOString()});
         await savePatterns();
         delete openTrades[sym];
+        delete lastBuyTime[sym];
       }
       continue;
     }
@@ -698,13 +714,14 @@ const managePositions = async (tzPos) => {
         tradeLog.unshift({type:"TRAIL",symbol:sym,qty,price:cur,pnlPct:pnlPct.toFixed(1),ts:new Date().toISOString()});
         await savePatterns();
         delete openTrades[sym];
+        delete lastBuyTime[sym];
       }
     }
   }
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// AUTO TRADER (unchanged)
+// AUTO TRADER (with duplicate prevention & max entry gain)
 // ════════════════════════════════════════════════════════════════════════════
 const autoTrade = async () => {
   lastScanTime=new Date().toISOString();
@@ -719,6 +736,7 @@ const autoTrade = async () => {
       if(!tzPos.find(p=>p.sym===sym)){
         console.log(`🗑️ ${sym} closed in TZ — removing`);
         delete openTrades[sym];
+        delete lastBuyTime[sym];
       }
     }
     if(tzPos.length) await managePositions(tzPos);
@@ -736,6 +754,7 @@ const autoTrade = async () => {
             console.log(`🌙 SOLD ${p.sym} x${p.qty} @$${price.toFixed(2)} | ${pnl}%`);
             if(openTrades[p.sym]) recordPattern(openTrades[p.sym],parseFloat(pnl));
             delete openTrades[p.sym];
+            delete lastBuyTime[p.sym];
           }
         }
       }
@@ -780,6 +799,17 @@ const autoTrade = async () => {
     const slotsLeft=CONFIG.MAX_POSITIONS-longPos.length;
     const scored=[];
     for(const stock of candidates.slice(0,6)){
+      // Skip if recently bought (cooldown)
+      const lastBuy = lastBuyTime[stock.symbol];
+      if (lastBuy && (Date.now() - lastBuy) < CONFIG.COOLDOWN_MINUTES * 60 * 1000) {
+        console.log(`⏸️ ${stock.symbol} in cooldown (bought ${Math.round((Date.now()-lastBuy)/60000)} min ago)`);
+        continue;
+      }
+      // Skip if already too high (max entry gain)
+      if (stock.pct > CONFIG.MAX_ENTRY_GAIN_PCT) {
+        console.log(`🚫 ${stock.symbol}: gain ${stock.pct}% exceeds max entry gain ${CONFIG.MAX_ENTRY_GAIN_PCT}%`);
+        continue;
+      }
       let mktCapM = 0;
       try {
         const cap = await yahooMarketCap(stock.symbol);
@@ -818,6 +848,7 @@ const autoTrade = async () => {
           float:stock.float,
           patternScore:stock.finalScore,
         };
+        lastBuyTime[stock.symbol] = Date.now();
         tradeLog.unshift({type:"BUY",symbol:stock.symbol,qty,price,pct:stock.pct,vol:stock.vol,relVol:stock.chart.relVol,score:stock.finalScore,ts:new Date().toISOString()});
         console.log(`✅ ${stock.symbol} bought`);
       } else {
@@ -844,7 +875,7 @@ const getInterval = () => {
 const startAutoTrader = () => {
   if(autoTraderActive) return;
   autoTraderActive=true;
-  console.log("🤖 PulseTrader v19.6 STARTED — Volume Spike Hunter (Yahoo Primary)");
+  console.log("🤖 PulseTrader v20.0 STARTED — Multi‑Source Scanner");
   const run=async()=>{
     await autoTrade();
     if(autoTraderActive) scanTimer=setTimeout(run,getInterval());
@@ -891,7 +922,7 @@ app.post("/api/chat", async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// ROUTES (all unchanged, using Yahoo)
+// ROUTES (unchanged, using Yahoo for quotes)
 // ════════════════════════════════════════════════════════════════════════════
 app.post("/api/autotrader/start",(_,res)=>{startAutoTrader();res.json({status:"started"});});
 app.get( "/api/autotrader/start",(_,res)=>{startAutoTrader();res.json({status:"started"});});
@@ -905,14 +936,14 @@ app.post("/api/autotrader/sellall",async(_,res)=>{
   for(const p of longsOnly){
     const quote = await yahooQuote(p.sym);
     const price = quote.c || p.entry;
-    if(price){const r=await tzOrder(p.sym,"Sell",p.qty,price);if(r.success){sold++;delete openTrades[p.sym];}}
+    if(price){const r=await tzOrder(p.sym,"Sell",p.qty,price);if(r.success){sold++;delete openTrades[p.sym]; delete lastBuyTime[p.sym];}}
   }
   res.json({sold,total:longsOnly.length});
 });
 app.get("/api/autotrader/status",async(_,res)=>{
   const[acc,pos]=await Promise.all([tzAccount().catch(()=>null),tzPositions().catch(()=>[])]);
   res.json({
-    active:autoTraderActive,last_scan:lastScanTime,version:"19.6.0",
+    active:autoTraderActive,last_scan:lastScanTime,version:"20.0.0",
     equity:acc?.equity?.toFixed(2),cash:acc?.cash?.toFixed(2),pnl:acc?.pnl?.toFixed(2),
     positions:pos.length,max_positions:CONFIG.MAX_POSITIONS,
     open_trades:Object.keys(openTrades),
@@ -1019,7 +1050,7 @@ app.get("/api/news",async(req,res)=>{
   res.json([]);
 });
 app.get("/health",(_,res)=>res.json({
-  status:"ok",version:"19.6.0",
+  status:"ok",version:"20.0.0",
   active:autoTraderActive,
   positions:Object.keys(openTrades).length,
   patterns:{winners:PATTERNS.winners.length,losers:PATTERNS.losers.length},
@@ -1031,10 +1062,10 @@ app.get("/health",(_,res)=>res.json({
 // ════════════════════════════════════════════════════════════════════════════
 const PORT=process.env.PORT||3001;
 app.listen(PORT,async()=>{
-  console.log(`⚡ PulseTrader v19.6 — Volume Spike Hunter (YAHOO PRIMARY)`);
+  console.log(`⚡ PulseTrader v20.0 — Multi‑Source Scanner (Twelve Data primary)`);
   console.log(`   Targets: JZ +325% | HKIT +350% | ABTS +115% | HUBC +97%`);
   console.log(`   Max positions: ${CONFIG.MAX_POSITIONS} | Stop: -${CONFIG.HARD_STOP_PCT}%`);
-  console.log(`   Using Yahoo Finance (no API key) + Alpha Vantage + Alpaca`);
+  console.log(`   Sources: Twelve Data, Yahoo, Alpha Vantage, Alpaca`);
   await startup();
   startAutoTrader();
 });
