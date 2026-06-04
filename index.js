@@ -1,5 +1,6 @@
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  PULSETRADER v20.2 — MULTI‑SOURCE WITH FALLBACK SYMBOLS & SELL FIX      ║
+// ║  PULSETRADER v20.3 — VOLUME INFLOW SCANNER + LIMIT ORDERS              ║
+// ║  Finds small‑cap, high‑volume momentum stocks                          ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
 
 import express from "express";
@@ -49,7 +50,7 @@ button{width:100%;background:#00ff88;color:#020508;border:none;border-radius:8px
 button:active{opacity:.8}
 .err{color:#ff3355;font-size:11px;text-align:center;margin-top:8px;letter-spacing:1px;min-height:14px}
 </style></head><body>
-<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v20.2</div></div>
+<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v20.3</div></div>
 <div class="box"><form method="POST" action="/login">
 <input type="password" name="passcode" maxlength="20" placeholder="••••••••" autocomplete="off" autofocus>
 <button type="submit">ENTER</button>
@@ -218,7 +219,7 @@ const groq = async (msgs, maxTokens=700) => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// TRADEZERO API (fixed JSON parsing AND sell order fix)
+// TRADEZERO API (fixed JSON parsing)
 // ════════════════════════════════════════════════════════════════════════════
 const TZ = () => (process.env.TZ_API_URL||"https://webapi.tradezero.com").replace(/\/$/,"");
 const ACC = () => process.env.TZ_ACCOUNT_ID||"";
@@ -304,20 +305,21 @@ const tzPositions = async () => {
   } catch(e){console.log("tzPositions:",e.message);return [];}
 };
 
-// ⭐ FIXED tzOrder – sells use Market orders with limitPrice=0
+// ⭐ FIXED tzOrder – LIMIT ORDERS for both buys and sells
 const tzOrder = async (symbol, side, qty, price) => {
   if (!qty || qty < 1 || !price || price <= 0) return { success: false, error: "invalid" };
   const tzSide = side === "Buy" ? "Buy" : "Sell";
   const isBuy = tzSide === "Buy";
-  // For sells: use Market order with limitPrice = 0
-  const orderType = isBuy ? "Limit" : "Market";
-  const limitPrice = isBuy ? parseFloat((price * 1.002).toFixed(4)) : 0;
+  // Buy limit slightly above, sell limit slightly below to improve fill probability
+  const limitPrice = isBuy
+    ? parseFloat((price * 1.002).toFixed(4))
+    : parseFloat((price * 0.998).toFixed(4));
   const body = {
     clientOrderId: `PT-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
     symbol: symbol.toUpperCase(),
     securityType: "Stock",
     side: tzSide,
-    orderType: orderType,
+    orderType: "Limit",
     limitPrice: limitPrice,
     price: limitPrice,
     traderAction: tzSide,
@@ -332,7 +334,7 @@ const tzOrder = async (symbol, side, qty, price) => {
       console.log(`TZ order failed: ${JSON.stringify(d)}`);
       return { success: false, status: d.error || "API error" };
     }
-    console.log(`TZ ${side} ${symbol} x${qty} @${limitPrice || "market"}:`, JSON.stringify(d).slice(0, 120));
+    console.log(`TZ ${side} ${symbol} x${qty} @${limitPrice}:`, JSON.stringify(d).slice(0, 120));
     const ok = !["Rejected", "Canceled", "Expired"].includes(d.orderStatus) && !!d.orderStatus;
     return { success: ok, status: d.orderStatus, data: d };
   } catch (e) {
@@ -532,12 +534,45 @@ const getDynamicThresholds = () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// ⭐ SCANNER – ALL SOURCES + FALLBACK HARDCODED LIST
+// ⭐ ENHANCED SCANNER – VOLUME INFLOW + ALL SOURCES + FALLBACK
 // ════════════════════════════════════════════════════════════════════════════
 const scanForSpikes = async () => {
   const gainers = [];
   const { minGain, minVol } = getDynamicThresholds();
   console.log(`🔍 Scanning with minGain=${minGain}% minVol=${minVol.toLocaleString()}`);
+
+  // ----- NEW: Volume inflow scanner (most active stocks by volume) -----
+  let volumeCandidates = [];
+  try {
+    // Alpaca most active (by volume) – works during RTH and sometimes pre-market
+    const d = await alpaca("/v1beta1/screener/stocks/movers?by=volume&top=50&market_type=sip");
+    const list = d.gainers || [];
+    const losers = d.losers || [];
+    const all = [...list, ...losers];
+    console.log(`📡 Alpaca volume movers: ${all.length} symbols`);
+    for (const g of all) {
+      const price = g.price || 0;
+      const vol = g.volume || 0;
+      if (price >= CONFIG.MIN_PRICE && price <= CONFIG.MAX_PRICE && vol >= minVol) {
+        const quote = await yahooQuote(g.symbol);
+        if (quote.c && quote.c >= CONFIG.MIN_PRICE && quote.c <= CONFIG.MAX_PRICE &&
+            quote.v >= minVol && quote.dp >= minGain) {
+          volumeCandidates.push({
+            symbol: g.symbol,
+            price: quote.c,
+            pct: quote.dp,
+            vol: quote.v,
+            src: "volume"
+          });
+        }
+      }
+      await new Promise(r => setTimeout(r, 200));
+    }
+  } catch(e) { console.log("Volume screener error:", e.message); }
+
+  for (const g of volumeCandidates) {
+    if (!gainers.find(x => x.symbol === g.symbol)) gainers.push(g);
+  }
 
   // ----- SOURCE 1: Twelve Data -----
   let twelveList = await twelveDataGainers();
@@ -582,12 +617,12 @@ const scanForSpikes = async () => {
     } catch(e) { console.log("Alpha Vantage error:", e.message); }
   }
 
-  // ----- SOURCE 4: Alpaca -----
+  // ----- SOURCE 4: Alpaca gainers (fallback) -----
   if (gainers.length < 3) {
     try {
       const d = await alpaca("/v1beta1/screener/stocks/movers?by=percent_change&top=100&market_type=sip");
       const list = d.gainers || [];
-      console.log(`📡 Alpaca returned ${list.length} gainers (fallback)`);
+      console.log(`📡 Alpaca gainers returned ${list.length} (fallback)`);
       for (const g of list) {
         if (g.price >= CONFIG.MIN_PRICE && g.price <= CONFIG.MAX_PRICE &&
             g.percent_change >= minGain && (g.volume || 0) >= minVol &&
@@ -604,7 +639,7 @@ const scanForSpikes = async () => {
     } catch(e) { console.log("Alpaca error:", e.message); }
   }
 
-  // ----- SOURCE 5: HARDCODED FALLBACK LIST (works when APIs fail) -----
+  // ----- SOURCE 5: HARDCODED FALLBACK LIST (last resort) -----
   if (gainers.length === 0) {
     console.log("⚠️ All APIs returned 0 – attempting fallback with popular small caps");
     const fallbackSymbols = ["LASE", "PMI", "BJDX", "RKTO", "DEVS", "STAK", "DXST", "TELL", "KOLD", "BOIL"];
@@ -655,7 +690,7 @@ const scanForSpikes = async () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// POSITION MANAGER (unchanged, but uses fixed yahooQuote)
+// POSITION MANAGER (unchanged)
 // ════════════════════════════════════════════════════════════════════════════
 const managePositions = async (tzPos) => {
   for(const pos of tzPos){
@@ -749,7 +784,7 @@ const managePositions = async (tzPos) => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// AUTO TRADER (unchanged but uses new scanner)
+// AUTO TRADER (unchanged)
 // ════════════════════════════════════════════════════════════════════════════
 const autoTrade = async () => {
   lastScanTime=new Date().toISOString();
@@ -900,7 +935,7 @@ const getInterval = () => {
 const startAutoTrader = () => {
   if(autoTraderActive) return;
   autoTraderActive=true;
-  console.log("🤖 PulseTrader v20.2 STARTED — Multi‑Source + Fallback + Sell Fix");
+  console.log("🤖 PulseTrader v20.3 STARTED — Volume Inflow Scanner + Limit Orders");
   const run=async()=>{
     await autoTrade();
     if(autoTraderActive) scanTimer=setTimeout(run,getInterval());
@@ -940,14 +975,149 @@ const startup = async () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// CHAT (simplified)
+// CHAT – Full Command Support
 // ════════════════════════════════════════════════════════════════════════════
 app.post("/api/chat", async (req, res) => {
-  res.json({ reply: "Chat ready" });
+  const { messages } = req.body;
+  if (!messages?.length) return res.status(400).json({ error: "No messages" });
+  const userMsg = messages[messages.length - 1]?.content || "";
+  const command = userMsg.trim();
+
+  const [acc, positions] = await Promise.all([
+    tzAccount().catch(() => null),
+    tzPositions().catch(() => [])
+  ]);
+  const longs = positions.filter(p => !p.isShort);
+
+  let reply = "";
+
+  if (command.startsWith("EXECUTE_STATUS")) {
+    const wins = PATTERNS.winners.length;
+    const losses = PATTERNS.losers.length;
+    const wr = wins + losses > 0 ? ((wins / (wins + losses)) * 100).toFixed(0) : 0;
+    reply = `**Bot Status**\n- Running: ${autoTraderActive ? "✅ YES" : "❌ NO"}\n- Equity: $${acc?.equity?.toFixed(2) || "?"}\n- Cash: $${acc?.cash?.toFixed(2) || "?"}\n- Today P&L: $${acc?.pnl?.toFixed(2) || "?"}\n- Open Positions: ${longs.length} / ${CONFIG.MAX_POSITIONS}\n- Patterns: ${wins}W / ${losses}L (${wr}% win rate)`;
+  }
+  else if (command.startsWith("EXECUTE_POSITIONS")) {
+    if (longs.length === 0) {
+      reply = "No open long positions.";
+    } else {
+      const posLines = await Promise.all(longs.map(async p => {
+        const quote = await yahooQuote(p.sym);
+        const cur = quote.c || p.entry;
+        const pnlPct = ((cur - p.entry) / p.entry) * 100;
+        const stop = (p.entry * (1 - CONFIG.HARD_STOP_PCT / 100)).toFixed(2);
+        return `${p.sym}: ${p.qty} sh @ $${p.entry.toFixed(2)} → $${cur.toFixed(2)} (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%) | Stop: $${stop}`;
+      }));
+      reply = `**Open Positions (${longs.length})**\n` + posLines.join("\n");
+    }
+  }
+  else if (command.startsWith("EXECUTE_MOVERS")) {
+    if (lastGainers.length === 0) {
+      reply = "No recent movers. Run a scan (bot will auto‑scan every minute).";
+    } else {
+      const top = lastGainers.slice(0, 8);
+      reply = "**Top Spikes from Last Scan**\n" + top.map((g, i) => `${i+1}. ${g.symbol} +${g.pct?.toFixed(1)}% @ $${g.price} | ${(g.vol/1e6).toFixed(1)}M vol`).join("\n");
+    }
+  }
+  else if (command.startsWith("EXECUTE_STOP")) {
+    stopAutoTrader();
+    reply = "⏹️ Auto‑trader stopped. Existing positions will still be managed (stops/targets).";
+  }
+  else if (command.startsWith("EXECUTE_START")) {
+    startAutoTrader();
+    reply = "🟢 Auto‑trader started.";
+  }
+  else if (command.startsWith("EXECUTE_SELL:")) {
+    const sym = command.split(":")[1]?.trim().toUpperCase();
+    const pos = longs.find(p => p.sym === sym);
+    if (!pos) {
+      reply = `❌ No long position found for ${sym}.`;
+    } else {
+      const quote = await yahooQuote(sym);
+      const price = quote.c || pos.entry;
+      const r = await tzOrder(sym, "Sell", pos.qty, price);
+      if (r.success) {
+        const pnl = ((price - pos.entry) / pos.entry) * 100;
+        reply = `✅ Sold ${sym} ${pos.qty} sh @ $${price.toFixed(2)} | P&L: ${pnl >= 0 ? "+" : ""}${pnl.toFixed(1)}%`;
+        delete openTrades[sym];
+        delete lastBuyTime[sym];
+      } else {
+        reply = `❌ Sell failed: ${r.status || r.error}`;
+      }
+    }
+  }
+  else if (command.startsWith("EXECUTE_SELLALL")) {
+    let sold = 0;
+    for (const p of longs) {
+      const quote = await yahooQuote(p.sym);
+      const price = quote.c || p.entry;
+      const r = await tzOrder(p.sym, "Sell", p.qty, price);
+      if (r.success) {
+        sold++;
+        delete openTrades[p.sym];
+        delete lastBuyTime[p.sym];
+      }
+      await new Promise(r => setTimeout(r, 300));
+    }
+    reply = `🔴 Sold ${sold} / ${longs.length} long positions. Remaining positions (shorts) untouched.`;
+  }
+  else if (command.startsWith("EXECUTE_ANALYZE:")) {
+    const sym = command.split(":")[1]?.trim().toUpperCase();
+    if (!sym) {
+      reply = "❌ Please provide a symbol, e.g., `EXECUTE_ANALYZE:LASE`";
+    } else {
+      const [quote, chart] = await Promise.all([
+        yahooQuote(sym),
+        analyzeChart(sym)
+      ]);
+      const price = quote.c || 0;
+      const pct = quote.dp || 0;
+      const vol = quote.v || 0;
+      const mcap = await yahooMarketCap(sym);
+      reply = `**Analysis for $${sym}**\n- Price: $${price.toFixed(2)} (${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%)\n- Volume: ${(vol/1e6).toFixed(2)}M\n- Market Cap: $${(mcap/1e6).toFixed(0)}M\n- Relative Volume: ${chart.relVol}x\n- Volume Acceleration: ${chart.volAccel}x\n- Pattern Score: ${chart.patternScore}/100\n- VWAP: $${chart.vwap?.toFixed(2)} ${chart.aboveVWAP ? "✅ above" : "❌ below"}\n- Higher Highs/Higher Lows: ${chart.hhhl ? "✅" : "❌"}\n- 3 Green Rising Candles: ${chart.greenRising ? "✅" : "❌"}`;
+    }
+  }
+  else if (command.startsWith("EXECUTE_COVER_ALL")) {
+    const shorts = positions.filter(p => p.isShort);
+    if (shorts.length === 0) {
+      reply = "No short positions to cover.";
+    } else {
+      let covered = 0;
+      for (const p of shorts) {
+        const quote = await yahooQuote(p.sym);
+        const price = quote.c || p.entry;
+        // Use a limit order to cover (buy to cover)
+        const limitPrice = parseFloat((price * 1.002).toFixed(4));
+        const body = {
+          clientOrderId: `PT-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,
+          symbol: p.sym,
+          securityType: "Stock",
+          side: "Buy",
+          orderType: "Limit",
+          limitPrice: limitPrice,
+          price: limitPrice,
+          traderAction: "Buy",
+          quantity: Math.floor(p.qty),
+          orderQuantity: Math.floor(p.qty),
+          timeInForce: "Day",
+          route: "TRAFIX_SIM"
+        };
+        const d = await tzAPI("POST", `/v1/api/accounts/${ACC()}/order`, body);
+        if (!d.error && !d.raw) covered++;
+        await new Promise(r => setTimeout(r, 300));
+      }
+      reply = `🔄 Covered ${covered} / ${shorts.length} short positions.`;
+    }
+  }
+  else {
+    reply = "Available commands: `EXECUTE_STATUS`, `EXECUTE_POSITIONS`, `EXECUTE_MOVERS`, `EXECUTE_STOP`, `EXECUTE_START`, `EXECUTE_SELL:SYMBOL`, `EXECUTE_SELLALL`, `EXECUTE_ANALYZE:SYMBOL`, `EXECUTE_COVER_ALL`";
+  }
+
+  res.json({ reply });
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// ROUTES (unchanged)
+// ROUTES
 // ════════════════════════════════════════════════════════════════════════════
 app.post("/api/autotrader/start",(_,res)=>{startAutoTrader();res.json({status:"started"});});
 app.get( "/api/autotrader/start",(_,res)=>{startAutoTrader();res.json({status:"started"});});
@@ -968,7 +1138,7 @@ app.post("/api/autotrader/sellall",async(_,res)=>{
 app.get("/api/autotrader/status",async(_,res)=>{
   const[acc,pos]=await Promise.all([tzAccount().catch(()=>null),tzPositions().catch(()=>[])]);
   res.json({
-    active:autoTraderActive,last_scan:lastScanTime,version:"20.2.0",
+    active:autoTraderActive,last_scan:lastScanTime,version:"20.3.0",
     equity:acc?.equity?.toFixed(2),cash:acc?.cash?.toFixed(2),pnl:acc?.pnl?.toFixed(2),
     positions:pos.length,max_positions:CONFIG.MAX_POSITIONS,
     open_trades:Object.keys(openTrades),
@@ -1075,7 +1245,7 @@ app.get("/api/news",async(req,res)=>{
   res.json([]);
 });
 app.get("/health",(_,res)=>res.json({
-  status:"ok",version:"20.2.0",
+  status:"ok",version:"20.3.0",
   active:autoTraderActive,
   positions:Object.keys(openTrades).length,
   patterns:{winners:PATTERNS.winners.length,losers:PATTERNS.losers.length},
@@ -1087,10 +1257,10 @@ app.get("/health",(_,res)=>res.json({
 // ════════════════════════════════════════════════════════════════════════════
 const PORT=process.env.PORT||3001;
 app.listen(PORT,async()=>{
-  console.log(`⚡ PulseTrader v20.2 — Multi‑Source Scanner + Fallback + Sell Fix`);
+  console.log(`⚡ PulseTrader v20.3 — Volume Inflow Scanner + Limit Orders`);
   console.log(`   Targets: JZ +325% | HKIT +350% | ABTS +115% | HUBC +97%`);
   console.log(`   Max positions: ${CONFIG.MAX_POSITIONS} | Stop: -${CONFIG.HARD_STOP_PCT}%`);
-  console.log(`   Sources: Twelve Data, Yahoo, Alpha Vantage, Alpaca, Fallback List`);
+  console.log(`   Sources: Volume movers, Twelve Data, Yahoo, Alpha Vantage, Alpaca, Fallback`);
   await startup();
   startAutoTrader();
 });
