@@ -1,5 +1,5 @@
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  PULSETRADER v20.6 — MULTI‑SOURCE SCANNER (UNLIMITED POSITIONS)        ║
+// ║  PULSETRADER v20.7 — MULTI‑SOURCE SCANNER (ALWAYS CHECK WATCHLIST)     ║
 // ║  Finds low‑cap, high‑volume momentum stocks using all available data   ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
 
@@ -50,7 +50,7 @@ button{width:100%;background:#00ff88;color:#020508;border:none;border-radius:8px
 button:active{opacity:.8}
 .err{color:#ff3355;font-size:11px;text-align:center;margin-top:8px;letter-spacing:1px;min-height:14px}
 </style></head><body>
-<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v20.6</div></div>
+<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v20.7</div></div>
 <div class="box"><form method="POST" action="/login">
 <input type="password" name="passcode" maxlength="20" placeholder="••••••••" autocomplete="off" autofocus>
 <button type="submit">ENTER</button>
@@ -73,17 +73,17 @@ app.get("/api/ping",(_,res)=>res.json({ok:true}));
 app.use("/api",requireAuth);
 
 // ════════════════════════════════════════════════════════════════════════════
-// CONFIG – UNLIMITED POSITIONS (set to a high number)
+// CONFIG – UNLIMITED POSITIONS
 // ════════════════════════════════════════════════════════════════════════════
 const CONFIG = {
-  MAX_POSITIONS:      100,    // Effectively unlimited (limited by cash)
+  MAX_POSITIONS:      100,
   HARD_STOP_PCT:      15,
   FIRST_TARGET_PCT:   30,
   SECOND_TARGET_PCT:  75,
   TRAIL_PCT:          12,
   MIN_GAIN_PCT:       5,
   MIN_VOL:            100000,
-  MAX_ENTRY_GAIN_PCT: 100,    // Allow high gainers (e.g., +74%, +124%)
+  MAX_ENTRY_GAIN_PCT: 100,
   CASH_PCT:           0.18,
   MAX_CASH_PER_TRADE: 40000,
   MIN_PRICE:          0.10,
@@ -108,7 +108,7 @@ let preMarketWatchlist = [];
 let preSpikeWatchlist  = [];
 
 // ════════════════════════════════════════════════════════════════════════════
-// API HELPERS
+// API HELPERS (unchanged)
 // ════════════════════════════════════════════════════════════════════════════
 const supabase = async (path,opts={}) => {
   try {
@@ -216,7 +216,7 @@ const groq = async (msgs, maxTokens=700) => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// TRADEZERO API
+// TRADEZERO API (unchanged)
 // ════════════════════════════════════════════════════════════════════════════
 const TZ = () => (process.env.TZ_API_URL||"https://webapi.tradezero.com").replace(/\/$/,"");
 const ACC = () => process.env.TZ_ACCOUNT_ID||"";
@@ -339,7 +339,7 @@ const tzOrder = async (symbol, side, qty, price) => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// CHART PATTERN (uses alpaca bars) – lowered patternScore threshold to 5
+// CHART PATTERN (uses alpaca bars) – lowered threshold to 5
 // ════════════════════════════════════════════════════════════════════════════
 const analyzeChart = async (symbol) => {
   try {
@@ -516,7 +516,7 @@ const scanPreSpike = async () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// DYNAMIC THRESHOLDS (unchanged)
+// DYNAMIC THRESHOLDS
 // ════════════════════════════════════════════════════════════════════════════
 const getDynamicThresholds = () => {
   const et = new Date(new Date().toLocaleString("en-US",{timeZone:"America/New_York"}));
@@ -530,7 +530,7 @@ const getDynamicThresholds = () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// ⭐ SCANNER – Finviz + all APIs + broad watchlist
+// ⭐ SCANNER – ALWAYS CHECKS BROAD WATCHLIST (moved outside the if block)
 // ════════════════════════════════════════════════════════════════════════════
 const scanForSpikes = async () => {
   const gainers = [];
@@ -639,26 +639,24 @@ const scanForSpikes = async () => {
     }
   } catch(e) { console.log("Alpaca gainers error:", e.message); }
 
-  // ----- SOURCE 5: Broad watchlist (only if nothing else found) -----
-  if (gainers.length === 0) {
-    console.log("⚠️ No spikes from any source – scanning broad watchlist");
-    const broadWatchlist = [
-      "LASE", "PMI", "BJDX", "RKTO", "DEVS", "STAK", "DXST", "TELL", "KOLD", "BOIL",
-      "ATPC", "CODX", "MNTS", "PLTR", "HOOD", "VCIG", "AMSS", "PHGE", "LGHL", "SPRC",
-      "FOXX", "SBEV", "YYGH", "EDHL", "MOBX", "CXAI", "TWAV", "STI", "ACCL", "RPGL"
-    ];
-    for (const sym of broadWatchlist) {
-      try {
-        const quote = await yahooQuote(sym);
-        if (quote.c && quote.c >= CONFIG.MIN_PRICE && quote.c <= CONFIG.MAX_PRICE &&
-            quote.dp >= minGain && quote.v >= minVol &&
-            !gainers.find(x => x.symbol === sym)) {
-          gainers.push({ symbol: sym, price: quote.c, pct: quote.dp, vol: quote.v, src: "watchlist" });
-        }
-      } catch(e) {}
-      await new Promise(r => setTimeout(r, 200));
-    }
-    console.log(`📡 Broad watchlist returned ${gainers.length} gainers`);
+  // ----- SOURCE 5: BROAD WATCHLIST (ALWAYS CHECK, NOT JUST FALLBACK) -----
+  console.log("📡 Checking broad watchlist (always)");
+  const broadWatchlist = [
+    "LASE", "PMI", "BJDX", "RKTO", "DEVS", "STAK", "DXST", "TELL", "KOLD", "BOIL",
+    "ATPC", "CODX", "MNTS", "PLTR", "HOOD", "VCIG", "AMSS", "PHGE", "LGHL", "SPRC",
+    "FOXX", "SBEV", "YYGH", "EDHL", "MOBX", "CXAI", "TWAV", "STI", "ACCL", "RPGL",
+    "VERU", "NEXR", "INDP", "HCAT"   // new additions from today's top movers
+  ];
+  for (const sym of broadWatchlist) {
+    try {
+      const quote = await yahooQuote(sym);
+      if (quote.c && quote.c >= CONFIG.MIN_PRICE && quote.c <= CONFIG.MAX_PRICE &&
+          quote.dp >= minGain && quote.v >= minVol &&
+          !gainers.find(x => x.symbol === sym)) {
+        gainers.push({ symbol: sym, price: quote.c, pct: quote.dp, vol: quote.v, src: "watchlist" });
+      }
+    } catch(e) {}
+    await new Promise(r => setTimeout(r, 200));
   }
 
   // ----- WATCHLISTS (pre‑spike & pre‑market) -----
@@ -789,7 +787,7 @@ const managePositions = async (tzPos) => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// AUTO TRADER – with lower pattern thresholds (5 instead of 15, finalScore 5) and unlimited positions
+// AUTO TRADER (with low pattern scores and unlimited positions)
 // ════════════════════════════════════════════════════════════════════════════
 const autoTrade = async () => {
   lastScanTime=new Date().toISOString();
@@ -846,7 +844,6 @@ const autoTrade = async () => {
       console.log(`🛑 Max ${CONFIG.MAX_POSITIONS} bot positions (${botManaged} managed, ${longPos.length} longs in TZ)`);
       return;
     }
-    // Increased safety limit to 100
     if(longPos.length>=100){
       console.log(`⚠️ TZ has ${longPos.length} long positions — not adding more`);
       return;
@@ -941,7 +938,7 @@ const getInterval = () => {
 const startAutoTrader = () => {
   if(autoTraderActive) return;
   autoTraderActive=true;
-  console.log("🤖 PulseTrader v20.6 STARTED — Unlimited Positions");
+  console.log("🤖 PulseTrader v20.7 STARTED — Always Check Watchlist");
   const run=async()=>{
     await autoTrade();
     if(autoTraderActive) scanTimer=setTimeout(run,getInterval());
@@ -1143,7 +1140,7 @@ app.post("/api/autotrader/sellall",async(_,res)=>{
 app.get("/api/autotrader/status",async(_,res)=>{
   const[acc,pos]=await Promise.all([tzAccount().catch(()=>null),tzPositions().catch(()=>[])]);
   res.json({
-    active:autoTraderActive,last_scan:lastScanTime,version:"20.6.0",
+    active:autoTraderActive,last_scan:lastScanTime,version:"20.7.0",
     equity:acc?.equity?.toFixed(2),cash:acc?.cash?.toFixed(2),pnl:acc?.pnl?.toFixed(2),
     positions:pos.length,max_positions:CONFIG.MAX_POSITIONS,
     open_trades:Object.keys(openTrades),
@@ -1250,7 +1247,7 @@ app.get("/api/news",async(req,res)=>{
   res.json([]);
 });
 app.get("/health",(_,res)=>res.json({
-  status:"ok",version:"20.6.0",
+  status:"ok",version:"20.7.0",
   active:autoTraderActive,
   positions:Object.keys(openTrades).length,
   patterns:{winners:PATTERNS.winners.length,losers:PATTERNS.losers.length},
@@ -1262,7 +1259,7 @@ app.get("/health",(_,res)=>res.json({
 // ════════════════════════════════════════════════════════════════════════════
 const PORT=process.env.PORT||3001;
 app.listen(PORT,async()=>{
-  console.log(`⚡ PulseTrader v20.6 — Unlimited Positions (MAX_POSITIONS=100)`);
+  console.log(`⚡ PulseTrader v20.7 — Always Check Broad Watchlist`);
   console.log(`   Targets: JZ +325% | HKIT +350% | ABTS +115% | HUBC +97%`);
   console.log(`   Max positions: ${CONFIG.MAX_POSITIONS} | Stop: -${CONFIG.HARD_STOP_PCT}%`);
   console.log(`   Sources: Finviz, Twelve Data, Yahoo, Alpha Vantage, Alpaca, Watchlists`);
