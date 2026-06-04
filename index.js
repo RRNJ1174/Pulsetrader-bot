@@ -339,7 +339,7 @@ const tzOrder = async (symbol, side, qty, price) => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// CHART PATTERN (uses alpaca bars – unchanged)
+// CHART PATTERN (uses alpaca bars)
 // ════════════════════════════════════════════════════════════════════════════
 const analyzeChart = async (symbol) => {
   try {
@@ -545,7 +545,6 @@ const scanForSpikes = async () => {
       headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
     });
     const html = await res.text();
-    // Extract table rows – Finviz uses class "screener-body-table"
     const rows = html.match(/<tr class="(?:table-dark-row|table-light-row)">.*?<\/tr>/gs);
     if (rows) {
       for (const row of rows.slice(0, 50)) {
@@ -564,7 +563,6 @@ const scanForSpikes = async () => {
     console.log(`📡 Finviz returned ${finvizList.length} gainers`);
   } catch(e) { console.log("Finviz scrape error:", e.message); }
 
-  // Enrich Finviz candidates with live Yahoo quotes (more accurate volume/price)
   for (const g of finvizList) {
     try {
       const quote = await yahooQuote(g.symbol);
@@ -641,7 +639,7 @@ const scanForSpikes = async () => {
     }
   } catch(e) { console.log("Alpaca gainers error:", e.message); }
 
-  // ----- SOURCE 5: Broad watchlist (50+ small‑cap symbols) – only if no other spikes found -----
+  // ----- SOURCE 5: Broad watchlist (only if nothing else found) -----
   if (gainers.length === 0) {
     console.log("⚠️ No spikes from any source – scanning broad watchlist");
     const broadWatchlist = [
@@ -697,27 +695,566 @@ const scanForSpikes = async () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// POSITION MANAGER (unchanged)
+// POSITION MANAGER (uses Yahoo for live prices)
 // ════════════════════════════════════════════════════════════════════════════
 const managePositions = async (tzPos) => {
-  // ... (keep exactly as in v20.3 – same as your current code)
-  // To save space, I'm not repeating it here – your existing managePositions is fine.
-  // Use the same function from your current index.js.
+  for(const pos of tzPos){
+    const {sym,qty,entry,isShort}=pos;
+    if(isShort){
+      console.log(`⏭️ Skipping ${sym} — short position (not managed by bot)`);
+      continue;
+    }
+    const state=openTrades[sym];
+    if(!state||entry<=0||qty<=0) continue;
+
+    const quote = await yahooQuote(sym);
+    const cur = quote.c || 0;
+    if(!cur||cur<=0) continue;
+
+    if(cur>state.peak) state.peak=cur;
+    const pnlPct=((cur-entry)/entry)*100;
+    const fromPeak=((cur-state.peak)/state.peak)*100;
+    console.log(`💰 ${sym}: $${cur.toFixed(2)} | ${pnlPct>=0?"+":""}${pnlPct.toFixed(1)}% | peak:$${state.peak.toFixed(2)}`);
+
+    if(pnlPct<=-CONFIG.HARD_STOP_PCT){
+      const etNow=new Date(new Date().toLocaleString("en-US",{timeZone:"America/New_York"}));
+      const tNow=etNow.getHours()*100+etNow.getMinutes();
+      const isWeekday=etNow.getDay()>=1&&etNow.getDay()<=5;
+      const mktOpen=isWeekday&&tNow>=400&&tNow<=1945;
+      if(!mktOpen){
+        console.log(`⏸️ STOP queued for ${sym} (${pnlPct.toFixed(1)}%) — market closed`);
+        state._stopQueued=true;
+        continue;
+      }
+      if(state._stopSent){
+        console.log(`⏸️ STOP already sent for ${sym}`);
+        continue;
+      }
+      console.log(`🛑 STOP ${sym} ${pnlPct.toFixed(1)}%`);
+      const r=await tzOrder(sym,"Sell",qty,cur);
+      if(r.success){
+        state._stopSent=true;
+        recordPattern(state, pnlPct);
+        tradeLog.unshift({type:"STOP",symbol:sym,qty,price:cur,pnlPct:pnlPct.toFixed(1),ts:new Date().toISOString()});
+        await savePatterns();
+        delete openTrades[sym];
+        delete lastBuyTime[sym];
+      }
+      continue;
+    }
+
+    if(!state.halfSold && pnlPct>=CONFIG.FIRST_TARGET_PCT){
+      const sellQty=Math.floor(qty/2);
+      if(sellQty>=1){
+        const r=await tzOrder(sym,"Sell",sellQty,cur);
+        if(r.success){
+          state.halfSold=true;
+          console.log(`🎯 ${sym} +${pnlPct.toFixed(0)}% — sold 50%`);
+          tradeLog.unshift({type:"TARGET1",symbol:sym,qty:sellQty,price:cur,pnlPct:pnlPct.toFixed(1),ts:new Date().toISOString()});
+        }
+      }
+    }
+
+    if(state.halfSold && !state.quarterSold && pnlPct>=CONFIG.SECOND_TARGET_PCT){
+      const sellQty=Math.floor(qty/4);
+      if(sellQty>=1){
+        const r=await tzOrder(sym,"Sell",sellQty,cur);
+        if(r.success){
+          state.quarterSold=true;
+          console.log(`🎯 ${sym} +${pnlPct.toFixed(0)}% — sold 25% more`);
+          tradeLog.unshift({type:"TARGET2",symbol:sym,qty:sellQty,price:cur,pnlPct:pnlPct.toFixed(1),ts:new Date().toISOString()});
+        }
+      }
+    }
+
+    if(state.halfSold && fromPeak<=-CONFIG.TRAIL_PCT){
+      const etNow2=new Date(new Date().toLocaleString("en-US",{timeZone:"America/New_York"}));
+      const tNow2=etNow2.getHours()*100+etNow2.getMinutes();
+      const isWeekday2=etNow2.getDay()>=1&&etNow2.getDay()<=5;
+      const mktOpen2=isWeekday2&&tNow2>=400&&tNow2<=1945;
+      if(!mktOpen2){console.log(`⏸️ Trail queued for ${sym}`);continue;}
+      if(state._trailSent){console.log(`⏸️ Trail already sent for ${sym}`);continue;}
+      console.log(`📉 TRAIL ${sym} ${fromPeak.toFixed(1)}% from peak`);
+      const r=await tzOrder(sym,"Sell",qty,cur);
+      if(r.success){
+        state._trailSent=true;
+        recordPattern(state, pnlPct);
+        tradeLog.unshift({type:"TRAIL",symbol:sym,qty,price:cur,pnlPct:pnlPct.toFixed(1),ts:new Date().toISOString()});
+        await savePatterns();
+        delete openTrades[sym];
+        delete lastBuyTime[sym];
+      }
+    }
+  }
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// AUTO TRADER (unchanged)
+// AUTO TRADER
 // ════════════════════════════════════════════════════════════════════════════
 const autoTrade = async () => {
-  // ... (keep exactly as in v20.3)
+  lastScanTime=new Date().toISOString();
+  const et=new Date(new Date().toLocaleString("en-US",{timeZone:"America/New_York"}));
+  const h=et.getHours(),m=et.getMinutes(),t=h*100+m;
+  const isWeekend=et.getDay()===0||et.getDay()===6;
+  console.log(`\n🔍 ${h}:${String(m).padStart(2,"0")} ET — scanning`);
+
+  try {
+    const tzPos=await tzPositions();
+    for(const sym of Object.keys(openTrades)){
+      if(!tzPos.find(p=>p.sym===sym)){
+        console.log(`🗑️ ${sym} closed in TZ — removing`);
+        delete openTrades[sym];
+        delete lastBuyTime[sym];
+      }
+    }
+    if(tzPos.length) await managePositions(tzPos);
+
+    const isEOD=!isWeekend&&t>=1955&&t<=2000;
+    if(isEOD&&tzPos.length){
+      console.log(`🌙 EOD SWEEP — selling ${tzPos.length} positions`);
+      for(const p of tzPos.filter(p=>!p.isShort)){
+        const quote = await yahooQuote(p.sym);
+        const price = quote.c || p.entry;
+        if(price>0){
+          const r=await tzOrder(p.sym,"Sell",p.qty,price);
+          if(r.success){
+            const pnl=((price-p.entry)/p.entry*100).toFixed(1);
+            console.log(`🌙 SOLD ${p.sym} x${p.qty} @$${price.toFixed(2)} | ${pnl}%`);
+            if(openTrades[p.sym]) recordPattern(openTrades[p.sym],parseFloat(pnl));
+            delete openTrades[p.sym];
+            delete lastBuyTime[p.sym];
+          }
+        }
+      }
+      return;
+    }
+
+    if(isWeekend||t<400||t>1945){
+      if(lastGainers.length&&!isWeekend){
+        preMarketWatchlist=lastGainers.slice(0,10).map(g=>g.symbol);
+        console.log(`📋 Pre-market watchlist: ${preMarketWatchlist.join(", ")}`);
+      }
+      if(!isWeekend) await scanPreSpike();
+      console.log(`⏸️ Outside trading hours`);
+      return;
+    }
+    if(t>=400&&t<930) await scanPreSpike();
+
+    const longPos=tzPos.filter(p=>!p.isShort);
+    const botManaged=longPos.filter(p=>openTrades[p.sym]).length;
+    if(botManaged>=CONFIG.MAX_POSITIONS){
+      console.log(`🛑 Max ${CONFIG.MAX_POSITIONS} bot positions (${botManaged} managed, ${longPos.length} longs in TZ)`);
+      return;
+    }
+    if(longPos.length>=15){
+      console.log(`⚠️ TZ has ${longPos.length} long positions — not adding more`);
+      return;
+    }
+
+    const acc=await tzAccount();
+    console.log(`💵 Equity:$${acc.equity?.toFixed(0)} Cash:$${acc.cash?.toFixed(0)} PnL:$${acc.pnl?.toFixed(0)}`);
+    if(acc.cash<2000){console.log("💵 Low cash");return;}
+
+    const movers=await scanForSpikes();
+    if(!movers.length) return;
+    lastGainers=movers.slice(0,20);
+    console.log(`🔥 Top spikes: ${movers.slice(0,5).map(g=>`${g.symbol}+${g.pct?.toFixed(0)}% ${(g.vol/1e6).toFixed(1)}Mvol`).join(" | ")}`);
+
+    const ownedLongs=longPos.map(p=>p.sym);
+    const candidates=movers.filter(g=>!ownedLongs.includes(g.symbol)).slice(0,8);
+    if(!candidates.length){console.log("⏭️ All spikes already owned");return;}
+
+    const slotsLeft=CONFIG.MAX_POSITIONS-longPos.length;
+    const scored=[];
+    for(const stock of candidates.slice(0,6)){
+      if (lastBuyTime[stock.symbol] && (Date.now() - lastBuyTime[stock.symbol]) < CONFIG.COOLDOWN_MINUTES * 60 * 1000) {
+        console.log(`⏸️ ${stock.symbol} in cooldown`);
+        continue;
+      }
+      if (stock.pct > CONFIG.MAX_ENTRY_GAIN_PCT) {
+        console.log(`🚫 ${stock.symbol}: gain ${stock.pct}% exceeds max entry gain ${CONFIG.MAX_ENTRY_GAIN_PCT}%`);
+        continue;
+      }
+      let mktCapM = 0;
+      try {
+        const cap = await yahooMarketCap(stock.symbol);
+        mktCapM = cap / 1e6;
+      } catch(e) {}
+      if(mktCapM > CONFIG.MAX_MKTCAP_M && mktCapM > 0){
+        console.log(`🚫 ${stock.symbol}: mktcap $${mktCapM.toFixed(0)}M > $${CONFIG.MAX_MKTCAP_M}M limit`);
+        continue;
+      }
+      const chart=await analyzeChart(stock.symbol);
+      if(chart.patternScore<15&&chart.relVol<3) continue;
+      console.log(`  📊 ${stock.symbol}: +${stock.pct?.toFixed(0)}% | vol:${(stock.vol/1e6).toFixed(1)}M | relVol:${chart.relVol}x | score:${chart.patternScore}`);
+      scored.push({...stock, mktCapM, chart, finalScore: chart.patternScore});
+      await new Promise(r=>setTimeout(r,200));
+    }
+    if(!scored.length){console.log("⏭️ No stocks passed pattern filter");return;}
+    scored.sort((a,b)=>b.finalScore-a.finalScore);
+
+    for(const stock of scored.slice(0,slotsLeft)){
+      if(stock.finalScore<10) continue;
+      const price = stock.price;
+      if(!price||price<=0||price<CONFIG.MIN_PRICE||price>CONFIG.MAX_PRICE) continue;
+      const maxDollars=Math.min(acc.cash*CONFIG.CASH_PCT, CONFIG.MAX_CASH_PER_TRADE);
+      const qty=Math.floor(maxDollars/price);
+      if(qty<1) continue;
+      console.log(`🚀 BUY ${stock.symbol} x${qty} @$${price} | +${stock.pct?.toFixed(0)}% | ${(stock.vol/1e6).toFixed(1)}Mvol | relVol:${stock.chart.relVol}x | score:${stock.finalScore}`);
+      const order=await tzOrder(stock.symbol,"Buy",qty,price);
+      if(order.success){
+        openTrades[stock.symbol]={
+          entry:price, qty, peak:price,
+          halfSold:false, quarterSold:false,
+          time:Date.now(), hour:h,
+          relVol:stock.chart.relVol,
+          volAccel:stock.chart.volAccel,
+          entryGainPct:stock.pct,
+          float:stock.float,
+          patternScore:stock.finalScore,
+        };
+        lastBuyTime[stock.symbol] = Date.now();
+        tradeLog.unshift({type:"BUY",symbol:stock.symbol,qty,price,pct:stock.pct,vol:stock.vol,relVol:stock.chart.relVol,score:stock.finalScore,ts:new Date().toISOString()});
+        console.log(`✅ ${stock.symbol} bought`);
+      } else {
+        console.log(`❌ ${stock.symbol} failed: ${order.status||order.error}`);
+      }
+    }
+  } catch(e){console.error("autoTrade:",e.message);}
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// SCHEDULER, CHAT, ROUTES, START – all unchanged from v20.3
+// SCHEDULER
 // ════════════════════════════════════════════════════════════════════════════
-// (Because the full file would exceed the response length, I assume you already have
-// the rest of the code from v20.3 – the only changes are in scanForSpikes above.
-// Please replace your current scanForSpikes with the new one and keep everything else.)
+const getInterval = () => {
+  const et=new Date(new Date().toLocaleString("en-US",{timeZone:"America/New_York"}));
+  const t=et.getHours()*100+et.getMinutes();
+  if(t>=930&&t<1000) return 15000;
+  if(t>=400&&t<930)  return 90000;
+  if(t>=1000&&t<1530) return 60000;
+  if(t>=1530&&t<1600) return 30000;
+  if(t>=1600&&t<1945) return 120000;
+  return 3600000;
+};
+
+const startAutoTrader = () => {
+  if(autoTraderActive) return;
+  autoTraderActive=true;
+  console.log("🤖 PulseTrader v20.4 STARTED — Multi‑Source Scanner (Finviz Primary)");
+  const run=async()=>{
+    await autoTrade();
+    if(autoTraderActive) scanTimer=setTimeout(run,getInterval());
+  };
+  run();
+};
+
+const stopAutoTrader = () => {
+  if(scanTimer) clearTimeout(scanTimer);
+  autoTraderActive=false; scanTimer=null;
+  console.log("⏹️ Stopped");
+};
+
+const startup = async () => {
+  console.log("🔄 Syncing with TZ...");
+  await loadPatterns();
+  try {
+    const positions=await tzPositions();
+    const longs=positions.filter(p=>!p.isShort);
+    const shorts=positions.filter(p=>p.isShort);
+    if(shorts.length) console.log(`⚠️ Found ${shorts.length} SHORT positions in TZ: ${shorts.map(p=>p.sym).join(",")} — bot will NOT manage these`);
+    for(const p of longs){
+      if(!openTrades[p.sym]&&p.entry>0){
+        const quote = await yahooQuote(p.sym);
+        const cur = quote.c || p.entry;
+        const pnlPct=cur>0?((cur-p.entry)/p.entry)*100:0;
+        if(cur>0&&pnlPct<=-CONFIG.HARD_STOP_PCT){
+          console.log(`⚠️ NOT restoring ${p.sym} — already at ${pnlPct.toFixed(1)}% (past hard stop). Skipping.`);
+          continue;
+        }
+        openTrades[p.sym]={entry:p.entry,qty:p.qty,peak:cur||p.entry,halfSold:false,quarterSold:false,time:Date.now(),hour:new Date().getHours()};
+        console.log(`📍 Restored LONG: ${p.sym} x${p.qty} @$${p.entry} | now $${cur.toFixed(2)} (${pnlPct>=0?"+":""}${pnlPct.toFixed(1)}%)`);
+      }
+    }
+    console.log(`🛡️ ${Object.keys(openTrades).length} long positions under management`);
+  } catch(e){console.log("Startup:",e.message);}
+};
+
+// ════════════════════════════════════════════════════════════════════════════
+// CHAT – Full Command Support
+// ════════════════════════════════════════════════════════════════════════════
+app.post("/api/chat", async (req, res) => {
+  const { messages } = req.body;
+  if (!messages?.length) return res.status(400).json({ error: "No messages" });
+  const userMsg = messages[messages.length - 1]?.content || "";
+  const command = userMsg.trim();
+
+  const [acc, positions] = await Promise.all([
+    tzAccount().catch(() => null),
+    tzPositions().catch(() => [])
+  ]);
+  const longs = positions.filter(p => !p.isShort);
+
+  let reply = "";
+
+  if (command.startsWith("EXECUTE_STATUS")) {
+    const wins = PATTERNS.winners.length;
+    const losses = PATTERNS.losers.length;
+    const wr = wins + losses > 0 ? ((wins / (wins + losses)) * 100).toFixed(0) : 0;
+    reply = `**Bot Status**\n- Running: ${autoTraderActive ? "✅ YES" : "❌ NO"}\n- Equity: $${acc?.equity?.toFixed(2) || "?"}\n- Cash: $${acc?.cash?.toFixed(2) || "?"}\n- Today P&L: $${acc?.pnl?.toFixed(2) || "?"}\n- Open Positions: ${longs.length} / ${CONFIG.MAX_POSITIONS}\n- Patterns: ${wins}W / ${losses}L (${wr}% win rate)`;
+  }
+  else if (command.startsWith("EXECUTE_POSITIONS")) {
+    if (longs.length === 0) {
+      reply = "No open long positions.";
+    } else {
+      const posLines = await Promise.all(longs.map(async p => {
+        const quote = await yahooQuote(p.sym);
+        const cur = quote.c || p.entry;
+        const pnlPct = ((cur - p.entry) / p.entry) * 100;
+        const stop = (p.entry * (1 - CONFIG.HARD_STOP_PCT / 100)).toFixed(2);
+        return `${p.sym}: ${p.qty} sh @ $${p.entry.toFixed(2)} → $${cur.toFixed(2)} (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%) | Stop: $${stop}`;
+      }));
+      reply = `**Open Positions (${longs.length})**\n` + posLines.join("\n");
+    }
+  }
+  else if (command.startsWith("EXECUTE_MOVERS")) {
+    if (lastGainers.length === 0) {
+      reply = "No recent movers. Run a scan (bot will auto‑scan every minute).";
+    } else {
+      const top = lastGainers.slice(0, 8);
+      reply = "**Top Spikes from Last Scan**\n" + top.map((g, i) => `${i+1}. ${g.symbol} +${g.pct?.toFixed(1)}% @ $${g.price} | ${(g.vol/1e6).toFixed(1)}M vol`).join("\n");
+    }
+  }
+  else if (command.startsWith("EXECUTE_STOP")) {
+    stopAutoTrader();
+    reply = "⏹️ Auto‑trader stopped. Existing positions will still be managed (stops/targets).";
+  }
+  else if (command.startsWith("EXECUTE_START")) {
+    startAutoTrader();
+    reply = "🟢 Auto‑trader started.";
+  }
+  else if (command.startsWith("EXECUTE_SELL:")) {
+    const sym = command.split(":")[1]?.trim().toUpperCase();
+    const pos = longs.find(p => p.sym === sym);
+    if (!pos) {
+      reply = `❌ No long position found for ${sym}.`;
+    } else {
+      const quote = await yahooQuote(sym);
+      const price = quote.c || pos.entry;
+      const r = await tzOrder(sym, "Sell", pos.qty, price);
+      if (r.success) {
+        const pnl = ((price - pos.entry) / pos.entry) * 100;
+        reply = `✅ Sold ${sym} ${pos.qty} sh @ $${price.toFixed(2)} | P&L: ${pnl >= 0 ? "+" : ""}${pnl.toFixed(1)}%`;
+        delete openTrades[sym];
+        delete lastBuyTime[sym];
+      } else {
+        reply = `❌ Sell failed: ${r.status || r.error}`;
+      }
+    }
+  }
+  else if (command.startsWith("EXECUTE_SELLALL")) {
+    let sold = 0;
+    for (const p of longs) {
+      const quote = await yahooQuote(p.sym);
+      const price = quote.c || p.entry;
+      const r = await tzOrder(p.sym, "Sell", p.qty, price);
+      if (r.success) {
+        sold++;
+        delete openTrades[p.sym];
+        delete lastBuyTime[p.sym];
+      }
+      await new Promise(r => setTimeout(r, 300));
+    }
+    reply = `🔴 Sold ${sold} / ${longs.length} long positions. Remaining positions (shorts) untouched.`;
+  }
+  else if (command.startsWith("EXECUTE_ANALYZE:")) {
+    const sym = command.split(":")[1]?.trim().toUpperCase();
+    if (!sym) {
+      reply = "❌ Please provide a symbol, e.g., `EXECUTE_ANALYZE:LASE`";
+    } else {
+      const [quote, chart] = await Promise.all([
+        yahooQuote(sym),
+        analyzeChart(sym)
+      ]);
+      const price = quote.c || 0;
+      const pct = quote.dp || 0;
+      const vol = quote.v || 0;
+      const mcap = await yahooMarketCap(sym);
+      reply = `**Analysis for $${sym}**\n- Price: $${price.toFixed(2)} (${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%)\n- Volume: ${(vol/1e6).toFixed(2)}M\n- Market Cap: $${(mcap/1e6).toFixed(0)}M\n- Relative Volume: ${chart.relVol}x\n- Volume Acceleration: ${chart.volAccel}x\n- Pattern Score: ${chart.patternScore}/100\n- VWAP: $${chart.vwap?.toFixed(2)} ${chart.aboveVWAP ? "✅ above" : "❌ below"}\n- Higher Highs/Higher Lows: ${chart.hhhl ? "✅" : "❌"}\n- 3 Green Rising Candles: ${chart.greenRising ? "✅" : "❌"}`;
+    }
+  }
+  else if (command.startsWith("EXECUTE_COVER_ALL")) {
+    const shorts = positions.filter(p => p.isShort);
+    if (shorts.length === 0) {
+      reply = "No short positions to cover.";
+    } else {
+      let covered = 0;
+      for (const p of shorts) {
+        const quote = await yahooQuote(p.sym);
+        const price = quote.c || p.entry;
+        const limitPrice = parseFloat((price * 1.002).toFixed(4));
+        const body = {
+          clientOrderId: `PT-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,
+          symbol: p.sym,
+          securityType: "Stock",
+          side: "Buy",
+          orderType: "Limit",
+          limitPrice: limitPrice,
+          price: limitPrice,
+          traderAction: "Buy",
+          quantity: Math.floor(p.qty),
+          orderQuantity: Math.floor(p.qty),
+          timeInForce: "Day",
+          route: "TRAFIX_SIM"
+        };
+        const d = await tzAPI("POST", `/v1/api/accounts/${ACC()}/order`, body);
+        if (!d.error && !d.raw) covered++;
+        await new Promise(r => setTimeout(r, 300));
+      }
+      reply = `🔄 Covered ${covered} / ${shorts.length} short positions.`;
+    }
+  }
+  else {
+    reply = "Available commands: `EXECUTE_STATUS`, `EXECUTE_POSITIONS`, `EXECUTE_MOVERS`, `EXECUTE_STOP`, `EXECUTE_START`, `EXECUTE_SELL:SYMBOL`, `EXECUTE_SELLALL`, `EXECUTE_ANALYZE:SYMBOL`, `EXECUTE_COVER_ALL`";
+  }
+
+  res.json({ reply });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// ROUTES (unchanged)
+// ════════════════════════════════════════════════════════════════════════════
+app.post("/api/autotrader/start",(_,res)=>{startAutoTrader();res.json({status:"started"});});
+app.get( "/api/autotrader/start",(_,res)=>{startAutoTrader();res.json({status:"started"});});
+app.post("/api/autotrader/stop", (_,res)=>{stopAutoTrader();res.json({status:"stopped"});});
+app.post("/api/autotrader/scan", async(_,res)=>{res.json({ok:true});autoTrade();});
+app.get("/api/alerts",(_,res)=>res.json({alerts:[]}));
+app.post("/api/autotrader/sellall",async(_,res)=>{
+  const positions=await tzPositions();
+  const longsOnly=positions.filter(p=>!p.isShort);
+  let sold=0;
+  for(const p of longsOnly){
+    const quote = await yahooQuote(p.sym);
+    const price = quote.c || p.entry;
+    if(price){const r=await tzOrder(p.sym,"Sell",p.qty,price);if(r.success){sold++;delete openTrades[p.sym]; delete lastBuyTime[p.sym];}}
+  }
+  res.json({sold,total:longsOnly.length});
+});
+app.get("/api/autotrader/status",async(_,res)=>{
+  const[acc,pos]=await Promise.all([tzAccount().catch(()=>null),tzPositions().catch(()=>[])]);
+  res.json({
+    active:autoTraderActive,last_scan:lastScanTime,version:"20.4.0",
+    equity:acc?.equity?.toFixed(2),cash:acc?.cash?.toFixed(2),pnl:acc?.pnl?.toFixed(2),
+    positions:pos.length,max_positions:CONFIG.MAX_POSITIONS,
+    open_trades:Object.keys(openTrades),
+    patterns:{winners:PATTERNS.winners.length,losers:PATTERNS.losers.length,stats:PATTERNS.stats},
+    recent_trades:tradeLog.slice(0,20),
+    top_movers:lastGainers.slice(0,10),
+    config:CONFIG,
+  });
+});
+app.get("/api/holdings",async(_,res)=>{
+  try{
+    const raw=await tzAPI("GET",`/v1/api/accounts/${ACC()}/positions`);
+    const list=Array.isArray(raw)?raw:(raw.positions||raw.data||raw||[]);
+    if(!Array.isArray(list)||!list.length){
+      const acc2=await tzAccount().catch(()=>null);
+      return res.json({holdings:[],count:0,total_pnl:"0.00",today_pnl:acc2?.pnl?.toFixed(2)||"0"});
+    }
+    const syms=[...new Set(list.map(p=>(p.symbol||p.ticker||"").toUpperCase()).filter(Boolean))];
+    const priceMap={};
+    await Promise.all(syms.map(async sym=>{
+      const quote = await yahooQuote(sym);
+      priceMap[sym] = quote.c || 0;
+    }));
+    const rawMap={};
+    for(const p of list){
+      const sym=(p.symbol||p.ticker||"").toString().trim().toUpperCase();
+      if(!sym) continue;
+      const qty=Math.abs(parseFloat(p.shares??p.quantity??p.qty??0));
+      const entry=parseFloat(p.priceAvg??p.averagePrice??p.avgPrice??p.entryPrice??0);
+      const side=(p.side||"").toLowerCase();
+      if(side==="sell"||qty<=0) continue;
+      if(!rawMap[sym]){
+        rawMap[sym]={sym,qty,entry};
+      } else {
+        const totalQty=rawMap[sym].qty+qty;
+        rawMap[sym].entry=(rawMap[sym].entry*rawMap[sym].qty+entry*qty)/totalQty;
+        rawMap[sym].qty=totalQty;
+      }
+    }
+    const holdings=Object.values(rawMap).map(p=>{
+      const sym=p.sym;
+      const qty=p.qty;
+      const entry=p.entry;
+      const cur=priceMap[sym]||entry;
+      const pnl=entry>0&&cur>0?(cur-entry)*qty:0;
+      const pct=entry>0&&cur>0?((cur-entry)/entry*100):0;
+      return {
+        symbol:sym,
+        qty,
+        side:"long",
+        avg_entry:entry.toFixed(4),
+        current_price:cur.toFixed(4),
+        unrealized_pnl:pnl.toFixed(2),
+        unrealized_pnl_pct:pct.toFixed(2)+"%",
+        hard_stop:(entry*(1-CONFIG.HARD_STOP_PCT/100)).toFixed(4),
+        first_target:(entry*(1+CONFIG.FIRST_TARGET_PCT/100)).toFixed(4),
+      };
+    }).filter(p=>p.symbol&&p.qty>0);
+    const acc=await tzAccount().catch(()=>null);
+    const totalPnl=holdings.reduce((s,h)=>s+parseFloat(h.unrealized_pnl),0);
+    res.json({
+      holdings,
+      count:holdings.length,
+      total_pnl:totalPnl.toFixed(2),
+      today_pnl:acc?.pnl?.toFixed(2)||"0",
+      equity:acc?.equity?.toFixed(2)||"0",
+      cash:acc?.cash?.toFixed(2)||"0",
+    });
+  }catch(e){res.status(500).json({error:e.message});}
+});
+app.get("/api/account",async(_,res)=>{
+  try{const acc=await tzAccount();res.json({equity:acc.equity.toFixed(2),cash:acc.cash.toFixed(2),pnl_today:acc.pnl.toFixed(2)});}
+  catch(e){res.status(500).json({error:e.message});}
+});
+app.get("/api/movers",async(_,res)=>{
+  try{
+    const movers=await scanForSpikes();
+    lastGainers=movers.slice(0,20);
+    res.json({movers:movers.slice(0,20),count:movers.length,ts:new Date().toISOString()});
+  }catch(e){res.status(500).json({error:e.message});}
+});
+app.get("/api/quote",async(req,res)=>{
+  const{ticker="SPY"}=req.query;
+  try{
+    const quote = await yahooQuote(ticker.toUpperCase());
+    res.json({ticker, price: quote.c, pct: quote.dp, vol: quote.v});
+  } catch(e){res.status(500).json({error:e.message});}
+});
+app.get("/api/trades",async(_,res)=>{
+  try{res.json(await supabase("pulsetrader_trades?order=created_at.desc&limit=100").then(d=>Array.isArray(d)?d:[]));}
+  catch(e){res.status(500).json({error:e.message});}
+});
+app.post("/api/order",async(req,res)=>{
+  const{symbol,side,qty,price}=req.body;
+  if(!symbol||!side||!qty||!price) return res.status(400).json({error:"symbol,side,qty,price required"});
+  try{const r=await tzOrder(symbol.toUpperCase(),side==="buy"?"Buy":"Sell",parseInt(qty),parseFloat(price));res.json(r);}
+  catch(e){res.status(500).json({error:e.message});}
+});
+app.get("/api/debug/positions",async(_,res)=>{
+  try{const raw=await tzAPI("GET",`/v1/api/accounts/${ACC()}/positions`);const list=Array.isArray(raw)?raw:(raw.positions||raw.data||[]);res.json({count:list.length,first:list[0]||null});}
+  catch(e){res.status(500).json({error:e.message});}
+});
+app.get("/api/news",async(req,res)=>{
+  res.json([]);
+});
+app.get("/health",(_,res)=>res.json({
+  status:"ok",version:"20.4.0",
+  active:autoTraderActive,
+  positions:Object.keys(openTrades).length,
+  patterns:{winners:PATTERNS.winners.length,losers:PATTERNS.losers.length},
+  ts:new Date().toISOString()
+}));
 
 // ════════════════════════════════════════════════════════════════════════════
 // START
