@@ -1,5 +1,5 @@
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  PULSETRADER v20.5 — MULTI‑SOURCE SCANNER (FINVIZ PRIMARY)             ║
+// ║  PULSETRADER v20.6 — MULTI‑SOURCE SCANNER (UNLIMITED POSITIONS)        ║
 // ║  Finds low‑cap, high‑volume momentum stocks using all available data   ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
 
@@ -50,7 +50,7 @@ button{width:100%;background:#00ff88;color:#020508;border:none;border-radius:8px
 button:active{opacity:.8}
 .err{color:#ff3355;font-size:11px;text-align:center;margin-top:8px;letter-spacing:1px;min-height:14px}
 </style></head><body>
-<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v20.5</div></div>
+<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v20.6</div></div>
 <div class="box"><form method="POST" action="/login">
 <input type="password" name="passcode" maxlength="20" placeholder="••••••••" autocomplete="off" autofocus>
 <button type="submit">ENTER</button>
@@ -73,17 +73,17 @@ app.get("/api/ping",(_,res)=>res.json({ok:true}));
 app.use("/api",requireAuth);
 
 // ════════════════════════════════════════════════════════════════════════════
-// CONFIG
+// CONFIG – UNLIMITED POSITIONS (set to a high number)
 // ════════════════════════════════════════════════════════════════════════════
 const CONFIG = {
-  MAX_POSITIONS:      8,
+  MAX_POSITIONS:      100,    // Effectively unlimited (limited by cash)
   HARD_STOP_PCT:      15,
   FIRST_TARGET_PCT:   30,
   SECOND_TARGET_PCT:  75,
   TRAIL_PCT:          12,
   MIN_GAIN_PCT:       5,
   MIN_VOL:            100000,
-  MAX_ENTRY_GAIN_PCT: 100,   // Changed from 30 to 100 to allow high gainers
+  MAX_ENTRY_GAIN_PCT: 100,    // Allow high gainers (e.g., +74%, +124%)
   CASH_PCT:           0.18,
   MAX_CASH_PER_TRADE: 40000,
   MIN_PRICE:          0.10,
@@ -108,7 +108,7 @@ let preMarketWatchlist = [];
 let preSpikeWatchlist  = [];
 
 // ════════════════════════════════════════════════════════════════════════════
-// API HELPERS (unchanged)
+// API HELPERS
 // ════════════════════════════════════════════════════════════════════════════
 const supabase = async (path,opts={}) => {
   try {
@@ -216,7 +216,7 @@ const groq = async (msgs, maxTokens=700) => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// TRADEZERO API (unchanged)
+// TRADEZERO API
 // ════════════════════════════════════════════════════════════════════════════
 const TZ = () => (process.env.TZ_API_URL||"https://webapi.tradezero.com").replace(/\/$/,"");
 const ACC = () => process.env.TZ_ACCOUNT_ID||"";
@@ -530,7 +530,7 @@ const getDynamicThresholds = () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// ⭐ SCANNER – identical to v20.4 (Finviz + APIs + broad watchlist)
+// ⭐ SCANNER – Finviz + all APIs + broad watchlist
 // ════════════════════════════════════════════════════════════════════════════
 const scanForSpikes = async () => {
   const gainers = [];
@@ -789,7 +789,7 @@ const managePositions = async (tzPos) => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// AUTO TRADER – with lower pattern thresholds (5 instead of 15, finalScore 5)
+// AUTO TRADER – with lower pattern thresholds (5 instead of 15, finalScore 5) and unlimited positions
 // ════════════════════════════════════════════════════════════════════════════
 const autoTrade = async () => {
   lastScanTime=new Date().toISOString();
@@ -846,7 +846,8 @@ const autoTrade = async () => {
       console.log(`🛑 Max ${CONFIG.MAX_POSITIONS} bot positions (${botManaged} managed, ${longPos.length} longs in TZ)`);
       return;
     }
-    if(longPos.length>=15){
+    // Increased safety limit to 100
+    if(longPos.length>=100){
       console.log(`⚠️ TZ has ${longPos.length} long positions — not adding more`);
       return;
     }
@@ -885,7 +886,6 @@ const autoTrade = async () => {
         continue;
       }
       const chart=await analyzeChart(stock.symbol);
-      // Lowered patternScore threshold from 15 to 5
       if(chart.patternScore<5&&chart.relVol<2) continue;
       console.log(`  📊 ${stock.symbol}: +${stock.pct?.toFixed(0)}% | vol:${(stock.vol/1e6).toFixed(1)}M | relVol:${chart.relVol}x | score:${chart.patternScore}`);
       scored.push({...stock, mktCapM, chart, finalScore: chart.patternScore});
@@ -895,7 +895,6 @@ const autoTrade = async () => {
     scored.sort((a,b)=>b.finalScore-a.finalScore);
 
     for(const stock of scored.slice(0,slotsLeft)){
-      // Lowered finalScore threshold from 10 to 5
       if(stock.finalScore<5) continue;
       const price = stock.price;
       if(!price||price<=0||price<CONFIG.MIN_PRICE||price>CONFIG.MAX_PRICE) continue;
@@ -942,7 +941,7 @@ const getInterval = () => {
 const startAutoTrader = () => {
   if(autoTraderActive) return;
   autoTraderActive=true;
-  console.log("🤖 PulseTrader v20.5 STARTED — Multi‑Source Scanner (Finviz Primary)");
+  console.log("🤖 PulseTrader v20.6 STARTED — Unlimited Positions");
   const run=async()=>{
     await autoTrade();
     if(autoTraderActive) scanTimer=setTimeout(run,getInterval());
@@ -1144,7 +1143,7 @@ app.post("/api/autotrader/sellall",async(_,res)=>{
 app.get("/api/autotrader/status",async(_,res)=>{
   const[acc,pos]=await Promise.all([tzAccount().catch(()=>null),tzPositions().catch(()=>[])]);
   res.json({
-    active:autoTraderActive,last_scan:lastScanTime,version:"20.5.0",
+    active:autoTraderActive,last_scan:lastScanTime,version:"20.6.0",
     equity:acc?.equity?.toFixed(2),cash:acc?.cash?.toFixed(2),pnl:acc?.pnl?.toFixed(2),
     positions:pos.length,max_positions:CONFIG.MAX_POSITIONS,
     open_trades:Object.keys(openTrades),
@@ -1251,7 +1250,7 @@ app.get("/api/news",async(req,res)=>{
   res.json([]);
 });
 app.get("/health",(_,res)=>res.json({
-  status:"ok",version:"20.5.0",
+  status:"ok",version:"20.6.0",
   active:autoTraderActive,
   positions:Object.keys(openTrades).length,
   patterns:{winners:PATTERNS.winners.length,losers:PATTERNS.losers.length},
@@ -1263,7 +1262,7 @@ app.get("/health",(_,res)=>res.json({
 // ════════════════════════════════════════════════════════════════════════════
 const PORT=process.env.PORT||3001;
 app.listen(PORT,async()=>{
-  console.log(`⚡ PulseTrader v20.5 — Multi‑Source Scanner (Finviz Primary)`);
+  console.log(`⚡ PulseTrader v20.6 — Unlimited Positions (MAX_POSITIONS=100)`);
   console.log(`   Targets: JZ +325% | HKIT +350% | ABTS +115% | HUBC +97%`);
   console.log(`   Max positions: ${CONFIG.MAX_POSITIONS} | Stop: -${CONFIG.HARD_STOP_PCT}%`);
   console.log(`   Sources: Finviz, Twelve Data, Yahoo, Alpha Vantage, Alpaca, Watchlists`);
