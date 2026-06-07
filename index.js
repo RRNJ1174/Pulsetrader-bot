@@ -1,5 +1,5 @@
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  PULSETRADER v20.7 — MULTI‑SOURCE SCANNER (ALWAYS CHECK WATCHLIST)     ║
+// ║  PULSETRADER v20.8 — MULTI‑SOURCE SCANNER (FMP + MASSIVE + DASHBOARD)  ║
 // ║  Finds low‑cap, high‑volume momentum stocks using all available data   ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
 
@@ -50,7 +50,7 @@ button{width:100%;background:#00ff88;color:#020508;border:none;border-radius:8px
 button:active{opacity:.8}
 .err{color:#ff3355;font-size:11px;text-align:center;margin-top:8px;letter-spacing:1px;min-height:14px}
 </style></head><body>
-<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v20.7</div></div>
+<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v20.8</div></div>
 <div class="box"><form method="POST" action="/login">
 <input type="password" name="passcode" maxlength="20" placeholder="••••••••" autocomplete="off" autofocus>
 <button type="submit">ENTER</button>
@@ -108,7 +108,7 @@ let preMarketWatchlist = [];
 let preSpikeWatchlist  = [];
 
 // ════════════════════════════════════════════════════════════════════════════
-// API HELPERS (unchanged)
+// API HELPERS
 // ════════════════════════════════════════════════════════════════════════════
 const supabase = async (path,opts={}) => {
   try {
@@ -195,6 +195,42 @@ const yahooQuote = async (symbol) => {
 const yahooMarketCap = async (symbol) => {
   const quote = await yahooQuote(symbol);
   return quote.marketCap || 0;
+};
+
+// FMP (Financial Modeling Prep) top gainers
+const fmpGainers = async () => {
+  if (!process.env.FMP_API_KEY) return [];
+  try {
+    const url = `https://financialmodelingprep.com/api/v3/stock_market/gainers?apikey=${process.env.FMP_API_KEY}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!Array.isArray(data)) return [];
+    return data.slice(0, 30).map(s => ({
+      symbol: s.symbol,
+      price: s.price,
+      pct: s.changesPercentage,
+      vol: s.volume,
+      src: "fmp"
+    }));
+  } catch(e) { return []; }
+};
+
+// Massive (Polygon) top gainers
+const massiveGainers = async () => {
+  if (!process.env.MASSIVE_API_KEY) return [];
+  try {
+    const url = `https://api.massive.com/v2/snapshot/locale/us/markets/stocks/gainers?apikey=${process.env.MASSIVE_API_KEY}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data.tickers || !Array.isArray(data.tickers)) return [];
+    return data.tickers.slice(0, 30).map(t => ({
+      symbol: t.ticker,
+      price: t.day?.c,
+      pct: t.todaysChangePerc,
+      vol: t.day?.v,
+      src: "massive"
+    }));
+  } catch(e) { return []; }
 };
 
 const groq = async (msgs, maxTokens=700) => {
@@ -530,7 +566,7 @@ const getDynamicThresholds = () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// ⭐ SCANNER – ALWAYS CHECKS BROAD WATCHLIST (moved outside the if block)
+// ⭐ SCANNER – ALL SOURCES + BROAD WATCHLIST (ALWAYS CHECK)
 // ════════════════════════════════════════════════════════════════════════════
 const scanForSpikes = async () => {
   const gainers = [];
@@ -578,7 +614,27 @@ const scanForSpikes = async () => {
     await new Promise(r => setTimeout(r, 200));
   }
 
-  // ----- SOURCE 1: Twelve Data -----
+  // ----- SOURCE 1: FMP -----
+  let fmpList = await fmpGainers();
+  console.log(`📡 FMP returned ${fmpList.length} gainers`);
+  for (const g of fmpList) {
+    if (g.symbol && g.price >= CONFIG.MIN_PRICE && g.price <= CONFIG.MAX_PRICE &&
+        g.pct >= minGain && g.vol >= minVol && !gainers.find(x => x.symbol === g.symbol)) {
+      gainers.push(g);
+    }
+  }
+
+  // ----- SOURCE 2: Massive (Polygon) -----
+  let massiveList = await massiveGainers();
+  console.log(`📡 Massive returned ${massiveList.length} gainers`);
+  for (const g of massiveList) {
+    if (g.symbol && g.price >= CONFIG.MIN_PRICE && g.price <= CONFIG.MAX_PRICE &&
+        g.pct >= minGain && g.vol >= minVol && !gainers.find(x => x.symbol === g.symbol)) {
+      gainers.push(g);
+    }
+  }
+
+  // ----- SOURCE 3: Twelve Data -----
   let twelveList = await twelveDataGainers();
   console.log(`📡 Twelve Data returned ${twelveList.length} gainers`);
   for (const g of twelveList) {
@@ -588,7 +644,7 @@ const scanForSpikes = async () => {
     }
   }
 
-  // ----- SOURCE 2: Yahoo gainers -----
+  // ----- SOURCE 4: Yahoo gainers -----
   let yahooList = await yahooGainers();
   console.log(`📡 Yahoo returned ${yahooList.length} gainers`);
   for (const g of yahooList) {
@@ -598,7 +654,7 @@ const scanForSpikes = async () => {
     }
   }
 
-  // ----- SOURCE 3: Alpha Vantage -----
+  // ----- SOURCE 5: Alpha Vantage -----
   if (process.env.ALPHAVANTAGE_KEY) {
     try {
       const url = `https://www.alphavantage.co/query?function=TOP_GAINERS_LOSERS&apikey=${process.env.ALPHAVANTAGE_KEY}`;
@@ -619,7 +675,7 @@ const scanForSpikes = async () => {
     } catch(e) { console.log("Alpha Vantage error:", e.message); }
   }
 
-  // ----- SOURCE 4: Alpaca gainers -----
+  // ----- SOURCE 6: Alpaca gainers -----
   try {
     const d = await alpaca("/v1beta1/screener/stocks/movers?by=percent_change&top=100&market_type=sip");
     const list = d.gainers || [];
@@ -639,13 +695,13 @@ const scanForSpikes = async () => {
     }
   } catch(e) { console.log("Alpaca gainers error:", e.message); }
 
-  // ----- SOURCE 5: BROAD WATCHLIST (ALWAYS CHECK, NOT JUST FALLBACK) -----
+  // ----- SOURCE 7: BROAD WATCHLIST (ALWAYS CHECK) -----
   console.log("📡 Checking broad watchlist (always)");
   const broadWatchlist = [
     "LASE", "PMI", "BJDX", "RKTO", "DEVS", "STAK", "DXST", "TELL", "KOLD", "BOIL",
     "ATPC", "CODX", "MNTS", "PLTR", "HOOD", "VCIG", "AMSS", "PHGE", "LGHL", "SPRC",
     "FOXX", "SBEV", "YYGH", "EDHL", "MOBX", "CXAI", "TWAV", "STI", "ACCL", "RPGL",
-    "VERU", "NEXR", "INDP", "HCAT"   // new additions from today's top movers
+    "VERU", "NEXR", "INDP", "HCAT"
   ];
   for (const sym of broadWatchlist) {
     try {
@@ -938,7 +994,7 @@ const getInterval = () => {
 const startAutoTrader = () => {
   if(autoTraderActive) return;
   autoTraderActive=true;
-  console.log("🤖 PulseTrader v20.7 STARTED — Always Check Watchlist");
+  console.log("🤖 PulseTrader v20.8 STARTED — FMP + Massive + Dashboard");
   const run=async()=>{
     await autoTrade();
     if(autoTraderActive) scanTimer=setTimeout(run,getInterval());
@@ -1119,6 +1175,153 @@ app.post("/api/chat", async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
+// API KEY STATUS DASHBOARD
+// ════════════════════════════════════════════════════════════════════════════
+const testApiKey = async (url, options = {}) => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3000);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    clearTimeout(timeout);
+    return res.ok;
+  } catch (e) {
+    clearTimeout(timeout);
+    return false;
+  }
+};
+
+const getKeyStatus = async () => {
+  const status = {};
+
+  status.tradezero = {
+    name: "TradeZero",
+    connected: !!(process.env.TZ_API_KEY && process.env.TZ_API_SECRET && process.env.TZ_ACCOUNT_ID),
+    keyPresent: !!process.env.TZ_API_KEY,
+  };
+
+  if (process.env.ALPACA_KEY && process.env.ALPACA_SECRET) {
+    const url = "https://paper-api.alpaca.markets/v2/account";
+    const auth = Buffer.from(`${process.env.ALPACA_KEY}:${process.env.ALPACA_SECRET}`).toString("base64");
+    const ok = await testApiKey(url, { headers: { Authorization: `Basic ${auth}` } });
+    status.alpaca = { name: "Alpaca", connected: ok, keyPresent: true };
+  } else {
+    status.alpaca = { name: "Alpaca", connected: false, keyPresent: !!(process.env.ALPACA_KEY && process.env.ALPACA_SECRET) };
+  }
+
+  if (process.env.FINNHUB_KEY) {
+    const ok = await testApiKey(`https://finnhub.io/api/v1/quote?symbol=SPY&token=${process.env.FINNHUB_KEY}`);
+    status.finnhub = { name: "Finnhub", connected: ok, keyPresent: true };
+  } else {
+    status.finnhub = { name: "Finnhub", connected: false, keyPresent: false };
+  }
+
+  if (process.env.ALPHAVANTAGE_KEY) {
+    const ok = await testApiKey(`https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=IBM&apikey=${process.env.ALPHAVANTAGE_KEY}`);
+    status.alphavantage = { name: "Alpha Vantage", connected: ok, keyPresent: true };
+  } else {
+    status.alphavantage = { name: "Alpha Vantage", connected: false, keyPresent: false };
+  }
+
+  if (process.env.TWELVEDATA_API_KEY) {
+    const ok = await testApiKey(`https://api.twelvedata.com/quote?symbol=SPY&apikey=${process.env.TWELVEDATA_API_KEY}`);
+    status.twelvedata = { name: "Twelve Data", connected: ok, keyPresent: true };
+  } else {
+    status.twelvedata = { name: "Twelve Data", connected: false, keyPresent: false };
+  }
+
+  if (process.env.FMP_API_KEY) {
+    const ok = await testApiKey(`https://financialmodelingprep.com/api/v3/quote-short/SPY?apikey=${process.env.FMP_API_KEY}`);
+    status.fmp = { name: "FMP", connected: ok, keyPresent: true };
+  } else {
+    status.fmp = { name: "FMP", connected: false, keyPresent: false };
+  }
+
+  if (process.env.MASSIVE_API_KEY) {
+    const ok = await testApiKey(`https://api.massive.com/v2/aggs/ticker/SPY/prev?adjusted=true&apikey=${process.env.MASSIVE_API_KEY}`);
+    status.massive = { name: "Massive (Polygon)", connected: ok, keyPresent: true };
+  } else {
+    status.massive = { name: "Massive (Polygon)", connected: false, keyPresent: false };
+  }
+
+  status.groq = { name: "Groq", connected: !!process.env.GROQ_API_KEY, keyPresent: !!process.env.GROQ_API_KEY };
+  status.supabase = { name: "Supabase", connected: !!(process.env.SUPABASE_URL && process.env.SUPABASE_KEY), keyPresent: !!(process.env.SUPABASE_URL && process.env.SUPABASE_KEY) };
+  status.access = { name: "Access Code", connected: !!(process.env.ACCESS_CODE || process.env.PASSCODE), keyPresent: !!(process.env.ACCESS_CODE || process.env.PASSCODE) };
+
+  return status;
+};
+
+app.get("/api/keys/status", async (req, res) => {
+  if (!isAuthed(req)) return res.status(401).json({ error: "Unauthorized" });
+  const status = await getKeyStatus();
+  res.json(status);
+});
+
+app.get("/keys-status", (req, res) => {
+  if (!isAuthed(req)) return res.redirect("/login");
+  res.send(`
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PulseTrader – API Key Status</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #020508; color: #c8d8e8; font-family: 'Share Tech Mono', monospace; padding: 20px; }
+    .container { max-width: 800px; margin: 0 auto; background: #0a1520; border-radius: 12px; border: 1px solid #1a3050; padding: 24px; }
+    h1 { font-family: 'Rajdhani', sans-serif; font-size: 28px; color: #00ff88; letter-spacing: 2px; margin-bottom: 20px; text-align: center; }
+    .status-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+    .card { background: #060d14; border: 1px solid #1a3050; border-radius: 8px; padding: 16px; }
+    .card h3 { font-size: 18px; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; }
+    .status-led { width: 12px; height: 12px; border-radius: 50%; display: inline-block; margin-right: 8px; }
+    .led-green { background: #00ff88; box-shadow: 0 0 6px #00ff88; }
+    .led-red { background: #ff3355; box-shadow: 0 0 6px #ff3355; }
+    .status-text { font-size: 12px; color: #8aa0b0; }
+    .footer { margin-top: 24px; text-align: center; font-size: 12px; color: #4a6a8a; }
+    button { background: #00ff88; color: #020508; border: none; border-radius: 6px; padding: 8px 16px; font-family: 'Rajdhani', sans-serif; font-weight: bold; cursor: pointer; margin-top: 20px; width: 100%; }
+    button:active { opacity: 0.8; }
+    .refresh-info { font-size: 11px; text-align: center; margin-top: 12px; color: #4a6a8a; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>🔑 API Key Status Dashboard</h1>
+  <div id="statusGrid" class="status-grid">Loading...</div>
+  <button onclick="refreshStatus()">🔄 Refresh</button>
+  <div class="refresh-info">Last updated: <span id="timestamp">-</span></div>
+  <div class="footer">Green = Connected / Key Valid | Red = Missing or Invalid</div>
+</div>
+<script>
+  async function refreshStatus() {
+    try {
+      const res = await fetch('/api/keys/status');
+      const data = await res.json();
+      const grid = document.getElementById('statusGrid');
+      grid.innerHTML = '';
+      for (const [key, info] of Object.entries(data)) {
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML = \`
+          <h3><span>\${info.name}</span><span class="status-led \${info.connected ? 'led-green' : 'led-red'}"></span></h3>
+          <div class="status-text">\${info.connected ? '✅ Connected' : '❌ Not connected'}</div>
+          <div class="status-text">Key present: \${info.keyPresent ? 'Yes' : 'No'}</div>
+        \`;
+        grid.appendChild(card);
+      }
+      document.getElementById('timestamp').innerText = new Date().toLocaleTimeString();
+    } catch (err) {
+      document.getElementById('statusGrid').innerHTML = '<div style="color:#ff3355">Failed to load status</div>';
+    }
+  }
+  refreshStatus();
+  setInterval(refreshStatus, 30000);
+</script>
+</body>
+</html>
+  `);
+});
+
+// ════════════════════════════════════════════════════════════════════════════
 // ROUTES (unchanged)
 // ════════════════════════════════════════════════════════════════════════════
 app.post("/api/autotrader/start",(_,res)=>{startAutoTrader();res.json({status:"started"});});
@@ -1140,7 +1343,7 @@ app.post("/api/autotrader/sellall",async(_,res)=>{
 app.get("/api/autotrader/status",async(_,res)=>{
   const[acc,pos]=await Promise.all([tzAccount().catch(()=>null),tzPositions().catch(()=>[])]);
   res.json({
-    active:autoTraderActive,last_scan:lastScanTime,version:"20.7.0",
+    active:autoTraderActive,last_scan:lastScanTime,version:"20.8.0",
     equity:acc?.equity?.toFixed(2),cash:acc?.cash?.toFixed(2),pnl:acc?.pnl?.toFixed(2),
     positions:pos.length,max_positions:CONFIG.MAX_POSITIONS,
     open_trades:Object.keys(openTrades),
@@ -1247,7 +1450,7 @@ app.get("/api/news",async(req,res)=>{
   res.json([]);
 });
 app.get("/health",(_,res)=>res.json({
-  status:"ok",version:"20.7.0",
+  status:"ok",version:"20.8.0",
   active:autoTraderActive,
   positions:Object.keys(openTrades).length,
   patterns:{winners:PATTERNS.winners.length,losers:PATTERNS.losers.length},
@@ -1259,10 +1462,10 @@ app.get("/health",(_,res)=>res.json({
 // ════════════════════════════════════════════════════════════════════════════
 const PORT=process.env.PORT||3001;
 app.listen(PORT,async()=>{
-  console.log(`⚡ PulseTrader v20.7 — Always Check Broad Watchlist`);
+  console.log(`⚡ PulseTrader v20.8 — FMP + Massive + Dashboard`);
   console.log(`   Targets: JZ +325% | HKIT +350% | ABTS +115% | HUBC +97%`);
   console.log(`   Max positions: ${CONFIG.MAX_POSITIONS} | Stop: -${CONFIG.HARD_STOP_PCT}%`);
-  console.log(`   Sources: Finviz, Twelve Data, Yahoo, Alpha Vantage, Alpaca, Watchlists`);
+  console.log(`   Sources: Finviz, FMP, Massive, Twelve Data, Yahoo, Alpha Vantage, Alpaca, Watchlists`);
   await startup();
   startAutoTrader();
 });
