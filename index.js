@@ -1,6 +1,6 @@
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  PULSETRADER v20.9 — FIXED TRADEZERO API + GRACEFUL FALLBACK            ║
-// ║  Finds low‑cap, high‑volume momentum stocks using all available data   ║
+// ║  PULSETRADER v21.0 — PRE‑MARKET SCANNER + VOLUME EXIT                   ║
+// ║  Finds low‑cap, high‑volume momentum stocks using real‑time data        ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
 
 import express from "express";
@@ -50,7 +50,7 @@ button{width:100%;background:#00ff88;color:#020508;border:none;border-radius:8px
 button:active{opacity:.8}
 .err{color:#ff3355;font-size:11px;text-align:center;margin-top:8px;letter-spacing:1px;min-height:14px}
 </style></head><body>
-<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v20.9</div></div>
+<div><div class="logo">⚡ PULSETRADER</div><div class="sub">VOLUME SPIKE HUNTER · v21.0</div></div>
 <div class="box"><form method="POST" action="/login">
 <input type="password" name="passcode" maxlength="20" placeholder="••••••••" autocomplete="off" autofocus>
 <button type="submit">ENTER</button>
@@ -73,7 +73,7 @@ app.get("/api/ping",(_,res)=>res.json({ok:true}));
 app.use("/api",requireAuth);
 
 // ════════════════════════════════════════════════════════════════════════════
-// CONFIG – UNLIMITED POSITIONS
+// CONFIG – UNLIMITED POSITIONS, HIGH GAIN ALLOWANCE
 // ════════════════════════════════════════════════════════════════════════════
 const CONFIG = {
   MAX_POSITIONS:      100,
@@ -83,13 +83,15 @@ const CONFIG = {
   TRAIL_PCT:          12,
   MIN_GAIN_PCT:       5,
   MIN_VOL:            100000,
-  MAX_ENTRY_GAIN_PCT: 100,
+  MAX_ENTRY_GAIN_PCT: 500,      // Allow high gainers (e.g., +500%)
   CASH_PCT:           0.18,
   MAX_CASH_PER_TRADE: 40000,
   MIN_PRICE:          0.10,
   MAX_PRICE:          20,
   MAX_MKTCAP_M:       500,
   COOLDOWN_MINUTES:   5,
+  VOLUME_EXIT_PCT:    50,       // Sell if volume drops below 50% of recent average
+  VOLUME_LOOKBACK:    5,        // Minutes to look back for volume average
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -108,7 +110,7 @@ let preMarketWatchlist = [];
 let preSpikeWatchlist  = [];
 
 // ════════════════════════════════════════════════════════════════════════════
-// API HELPERS
+// API HELPERS (unchanged)
 // ════════════════════════════════════════════════════════════════════════════
 const supabase = async (path,opts={}) => {
   try {
@@ -252,7 +254,7 @@ const groq = async (msgs, maxTokens=700) => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// TRADEZERO API – FIXED (multiple endpoint attempts + graceful fallback)
+// TRADEZERO API – multiple endpoint attempts + graceful fallback
 // ════════════════════════════════════════════════════════════════════════════
 const TZ = () => (process.env.TZ_API_URL||"https://webapi.tradezero.com").replace(/\/$/,"");
 const ACC = () => process.env.TZ_ACCOUNT_ID||"";
@@ -288,7 +290,6 @@ const tzAPI = async (method, path, body = null) => {
   }
 };
 
-// Helper to try multiple endpoints for account and positions
 const tzAccount = async () => {
   const endpoints = [
     `/v1/trading/accounts/${ACC()}/pnl`,
@@ -340,7 +341,6 @@ const tzPositions = async () => {
     return { sym, qty, entry, isShort };
   }).filter(p => p.sym && p.qty > 0);
 
-  // merge duplicates
   const merged = {};
   for (const p of raw) {
     const key = `${p.sym}_${p.isShort ? "S" : "L"}`;
@@ -377,7 +377,7 @@ const tzPositions = async () => {
   return netted;
 };
 
-// LIMIT ORDERS for both buys and sells – also tries multiple endpoints
+// LIMIT ORDERS for both buys and sells – tries multiple endpoints
 const tzOrder = async (symbol, side, qty, price) => {
   if (!qty || qty < 1 || !price || price <= 0) return { success: false, error: "invalid" };
   const tzSide = side === "Buy" ? "Buy" : "Sell";
@@ -420,6 +420,7 @@ const tzOrder = async (symbol, side, qty, price) => {
 // CHART PATTERN (uses alpaca bars) – lowered threshold to 5
 // ════════════════════════════════════════════════════════════════════════════
 const analyzeChart = async (symbol) => {
+  // (unchanged – same as v20.9)
   try {
     const etNow=new Date(new Date().toLocaleString("en-US",{timeZone:"America/New_York"}));
     const etStart=new Date(etNow);
@@ -530,7 +531,7 @@ const getPatternBonus = (relVol, volAccel) => {
 const savePatterns = async () => {
   try {
     await supabase("bot_watchlist",{method:"POST",body:JSON.stringify({
-      label:"patterns_v20",
+      label:"patterns_v21",
       tickers:JSON.stringify({winners:PATTERNS.winners.slice(0,50),losers:PATTERNS.losers.slice(0,50),stats:PATTERNS.stats}).slice(0,90000),
       ts:new Date().toISOString()
     })});
@@ -539,7 +540,7 @@ const savePatterns = async () => {
 
 const loadPatterns = async () => {
   try {
-    const d=await supabase("bot_watchlist?label=eq.patterns_v20&order=created_at.desc&limit=1");
+    const d=await supabase("bot_watchlist?label=eq.patterns_v21&order=created_at.desc&limit=1");
     if(Array.isArray(d)&&d[0]?.tickers){
       const s=JSON.parse(d[0].tickers);
       PATTERNS.winners=s.winners||[];
@@ -608,40 +609,41 @@ const getDynamicThresholds = () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// ⭐ SCANNER – ALL SOURCES + BROAD WATCHLIST (ALWAYS CHECK)
+// ⭐ NEW SCANNER – PRE‑MARKET FINVIZ PRIMARY + ALL APIs (no hardcoded list)
 // ════════════════════════════════════════════════════════════════════════════
 const scanForSpikes = async () => {
   const gainers = [];
   const { minGain, minVol } = getDynamicThresholds();
   console.log(`🔍 Scanning with minGain=${minGain}% minVol=${minVol.toLocaleString()}`);
 
-  // ----- SOURCE 0: Finviz top gainers -----
-  let finvizList = [];
+  // ----- SOURCE 0: Finviz PRE‑MARKET (most important, catches early movers) -----
+  let finvizPreList = [];
   try {
-    const url = "https://finviz.com/screener.ashx?v=111&ft=4";
+    const url = "https://finviz.com/premarket.ashx";
     const res = await fetch(url, {
       headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
     });
     const html = await res.text();
-    const rows = html.match(/<tr class="(?:table-dark-row|table-light-row)">.*?<\/tr>/gs);
+    // Finviz pre-market table rows
+    const rows = html.match(/<tr class="(?:table-light-row-cp|table-dark-row-cp)">.*?<\/tr>/gs);
     if (rows) {
       for (const row of rows.slice(0, 50)) {
         const cells = row.match(/<td.*?>(.*?)<\/td>/gs);
-        if (cells && cells.length >= 8) {
+        if (cells && cells.length >= 7) {
           const ticker = cells[0].replace(/<.*?>/g, '').trim();
           const price = parseFloat(cells[2].replace(/<.*?>/g, '').trim());
-          const pct = parseFloat(cells[3].replace(/<.*?>/g, '').replace('%', '').trim());
+          const pct = parseFloat(cells[4].replace(/<.*?>/g, '').replace('%', '').trim());
           const vol = parseInt(cells[5].replace(/<.*?>/g, '').replace(/,/g, '').trim());
           if (ticker && price && !isNaN(pct) && !isNaN(vol)) {
-            finvizList.push({ symbol: ticker, price, pct, vol, src: "finviz" });
+            finvizPreList.push({ symbol: ticker, price, pct, vol, src: "finviz_pre" });
           }
         }
       }
     }
-    console.log(`📡 Finviz returned ${finvizList.length} gainers`);
-  } catch(e) { console.log("Finviz scrape error:", e.message); }
+    console.log(`📡 Finviz pre-market returned ${finvizPreList.length} gainers`);
+  } catch(e) { console.log("Finviz pre-market scrape error:", e.message); }
 
-  for (const g of finvizList) {
+  for (const g of finvizPreList) {
     try {
       const quote = await yahooQuote(g.symbol);
       const price = quote.c || g.price;
@@ -650,13 +652,48 @@ const scanForSpikes = async () => {
       if (price >= CONFIG.MIN_PRICE && price <= CONFIG.MAX_PRICE &&
           pct >= minGain && vol >= minVol &&
           !gainers.find(x => x.symbol === g.symbol)) {
-        gainers.push({ symbol: g.symbol, price, pct, vol, src: "finviz" });
+        gainers.push({ symbol: g.symbol, price, pct, vol, src: "finviz_pre" });
       }
     } catch(e) {}
     await new Promise(r => setTimeout(r, 200));
   }
 
-  // ----- SOURCE 1: FMP -----
+  // ----- SOURCE 1: Finviz regular top gainers (during RTH) -----
+  if (gainers.length === 0) {
+    try {
+      const url = "https://finviz.com/screener.ashx?v=111&ft=4";
+      const res = await fetch(url, {
+        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
+      });
+      const html = await res.text();
+      const rows = html.match(/<tr class="(?:table-dark-row|table-light-row)">.*?<\/tr>/gs);
+      if (rows) {
+        for (const row of rows.slice(0, 50)) {
+          const cells = row.match(/<td.*?>(.*?)<\/td>/gs);
+          if (cells && cells.length >= 8) {
+            const ticker = cells[0].replace(/<.*?>/g, '').trim();
+            const price = parseFloat(cells[2].replace(/<.*?>/g, '').trim());
+            const pct = parseFloat(cells[3].replace(/<.*?>/g, '').replace('%', '').trim());
+            const vol = parseInt(cells[5].replace(/<.*?>/g, '').replace(/,/g, '').trim());
+            if (ticker && price && !isNaN(pct) && !isNaN(vol)) {
+              const quote = await yahooQuote(ticker);
+              const finalPrice = quote.c || price;
+              const finalPct = quote.dp || pct;
+              const finalVol = quote.v || vol;
+              if (finalPrice >= CONFIG.MIN_PRICE && finalPrice <= CONFIG.MAX_PRICE &&
+                  finalPct >= minGain && finalVol >= minVol &&
+                  !gainers.find(x => x.symbol === ticker)) {
+                gainers.push({ symbol: ticker, price: finalPrice, pct: finalPct, vol: finalVol, src: "finviz_reg" });
+              }
+            }
+          }
+        }
+      }
+      console.log(`📡 Finviz regular returned ${gainers.filter(g=>g.src==="finviz_reg").length} gainers`);
+    } catch(e) { console.log("Finviz regular scrape error:", e.message); }
+  }
+
+  // ----- SOURCE 2: FMP -----
   let fmpList = await fmpGainers();
   console.log(`📡 FMP returned ${fmpList.length} gainers`);
   for (const g of fmpList) {
@@ -666,7 +703,7 @@ const scanForSpikes = async () => {
     }
   }
 
-  // ----- SOURCE 2: Massive (Polygon) -----
+  // ----- SOURCE 3: Massive (Polygon) -----
   let massiveList = await massiveGainers();
   console.log(`📡 Massive returned ${massiveList.length} gainers`);
   for (const g of massiveList) {
@@ -676,7 +713,7 @@ const scanForSpikes = async () => {
     }
   }
 
-  // ----- SOURCE 3: Twelve Data -----
+  // ----- SOURCE 4: Twelve Data -----
   let twelveList = await twelveDataGainers();
   console.log(`📡 Twelve Data returned ${twelveList.length} gainers`);
   for (const g of twelveList) {
@@ -686,7 +723,7 @@ const scanForSpikes = async () => {
     }
   }
 
-  // ----- SOURCE 4: Yahoo gainers -----
+  // ----- SOURCE 5: Yahoo gainers -----
   let yahooList = await yahooGainers();
   console.log(`📡 Yahoo returned ${yahooList.length} gainers`);
   for (const g of yahooList) {
@@ -696,7 +733,7 @@ const scanForSpikes = async () => {
     }
   }
 
-  // ----- SOURCE 5: Alpha Vantage -----
+  // ----- SOURCE 6: Alpha Vantage -----
   if (process.env.ALPHAVANTAGE_KEY) {
     try {
       const url = `https://www.alphavantage.co/query?function=TOP_GAINERS_LOSERS&apikey=${process.env.ALPHAVANTAGE_KEY}`;
@@ -717,7 +754,7 @@ const scanForSpikes = async () => {
     } catch(e) { console.log("Alpha Vantage error:", e.message); }
   }
 
-  // ----- SOURCE 6: Alpaca gainers -----
+  // ----- SOURCE 7: Alpaca gainers -----
   try {
     const d = await alpaca("/v1beta1/screener/stocks/movers?by=percent_change&top=100&market_type=sip");
     const list = d.gainers || [];
@@ -737,50 +774,8 @@ const scanForSpikes = async () => {
     }
   } catch(e) { console.log("Alpaca gainers error:", e.message); }
 
-  // ----- SOURCE 7: BROAD WATCHLIST (ALWAYS CHECK) -----
-  console.log("📡 Checking broad watchlist (always)");
-  const broadWatchlist = [
-    "LASE", "PMI", "BJDX", "RKTO", "DEVS", "STAK", "DXST", "TELL", "KOLD", "BOIL",
-    "ATPC", "CODX", "MNTS", "PLTR", "HOOD", "VCIG", "AMSS", "PHGE", "LGHL", "SPRC",
-    "FOXX", "SBEV", "YYGH", "EDHL", "MOBX", "CXAI", "TWAV", "STI", "ACCL", "RPGL",
-    "VERU", "NEXR", "INDP", "HCAT"
-  ];
-  for (const sym of broadWatchlist) {
-    try {
-      const quote = await yahooQuote(sym);
-      if (quote.c && quote.c >= CONFIG.MIN_PRICE && quote.c <= CONFIG.MAX_PRICE &&
-          quote.dp >= minGain && quote.v >= minVol &&
-          !gainers.find(x => x.symbol === sym)) {
-        gainers.push({ symbol: sym, price: quote.c, pct: quote.dp, vol: quote.v, src: "watchlist" });
-      }
-    } catch(e) {}
-    await new Promise(r => setTimeout(r, 200));
-  }
-
-  // ----- WATCHLISTS (pre‑spike & pre‑market) -----
-  for (const w of preSpikeWatchlist) {
-    try {
-      const quote = await yahooQuote(w.symbol);
-      const price = quote.c || 0;
-      const pct = quote.dp || 0;
-      const vol = quote.v || 0;
-      if (price > 0 && price <= CONFIG.MAX_PRICE && pct >= minGain && vol >= minVol && !gainers.find(x => x.symbol === w.symbol))
-        gainers.push({ symbol: w.symbol, price, pct, vol, src: "prescan" });
-    } catch (e) {}
-    await new Promise(r => setTimeout(r, 200));
-  }
-
-  for (const w of preMarketWatchlist) {
-    try {
-      const quote = await yahooQuote(w);
-      const price = quote.c || 0;
-      const pct = quote.dp || 0;
-      const vol = quote.v || 0;
-      if (price > 0 && pct >= minGain && vol >= minVol && !gainers.find(x => x.symbol === w))
-        gainers.push({ symbol: w, price, pct, vol, src: "watchlist" });
-    } catch (e) {}
-    await new Promise(r => setTimeout(r, 200));
-  }
+  // ----- NO HARDCODED WATCHLIST – the bot scans real market data only -----
+  // (The hardcoded list is removed as a primary source; you can keep it for pattern study elsewhere)
 
   if (gainers.length === 0) {
     console.log("📭 No spikes found – try again in a few minutes");
@@ -791,47 +786,75 @@ const scanForSpikes = async () => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// POSITION MANAGER (unchanged)
+// POSITION MANAGER – ADDED VOLUME‑BASED EXIT
 // ════════════════════════════════════════════════════════════════════════════
 const managePositions = async (tzPos) => {
-  for(const pos of tzPos){
-    const {sym,qty,entry,isShort}=pos;
-    if(isShort){
+  for (const pos of tzPos) {
+    const { sym, qty, entry, isShort } = pos;
+    if (isShort) {
       console.log(`⏭️ Skipping ${sym} — short position (not managed by bot)`);
       continue;
     }
-    const state=openTrades[sym];
-    if(!state||entry<=0||qty<=0) continue;
+    const state = openTrades[sym];
+    if (!state || entry <= 0 || qty <= 0) continue;
 
     const quote = await yahooQuote(sym);
     const cur = quote.c || 0;
-    if(!cur||cur<=0) continue;
+    if (!cur || cur <= 0) continue;
 
-    if(cur>state.peak) state.peak=cur;
-    const pnlPct=((cur-entry)/entry)*100;
-    const fromPeak=((cur-state.peak)/state.peak)*100;
-    console.log(`💰 ${sym}: $${cur.toFixed(2)} | ${pnlPct>=0?"+":""}${pnlPct.toFixed(1)}% | peak:$${state.peak.toFixed(2)}`);
+    if (cur > state.peak) state.peak = cur;
+    const pnlPct = ((cur - entry) / entry) * 100;
+    const fromPeak = ((cur - state.peak) / state.peak) * 100;
+    console.log(`💰 ${sym}: $${cur.toFixed(2)} | ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}% | peak:$${state.peak.toFixed(2)}`);
 
-    if(pnlPct<=-CONFIG.HARD_STOP_PCT){
-      const etNow=new Date(new Date().toLocaleString("en-US",{timeZone:"America/New_York"}));
-      const tNow=etNow.getHours()*100+etNow.getMinutes();
-      const isWeekday=etNow.getDay()>=1&&etNow.getDay()<=5;
-      const mktOpen=isWeekday&&tNow>=400&&tNow<=1945;
-      if(!mktOpen){
+    // ----- NEW: VOLUME EXIT (sell if volume dries up) -----
+    // Get recent 5-minute bars to calculate average volume
+    try {
+      const etNow = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+      const etStart = new Date(etNow);
+      etStart.setMinutes(etStart.getMinutes() - CONFIG.VOLUME_LOOKBACK);
+      const bars = await alpaca(`/v2/stocks/${sym}/bars?timeframe=1Min&start=${etStart.toISOString()}&limit=${CONFIG.VOLUME_LOOKBACK}&feed=iex`);
+      const volumes = (bars.bars || []).map(b => b.v).filter(v => v > 0);
+      if (volumes.length > 0) {
+        const avgVol = volumes.reduce((a, b) => a + b, 0) / volumes.length;
+        const currentVol = quote.v || 0;
+        const volRatio = avgVol > 0 ? (currentVol / avgVol) * 100 : 100;
+        if (volRatio < CONFIG.VOLUME_EXIT_PCT && state.time && (Date.now() - state.time) > 5 * 60 * 1000) {
+          console.log(`📉 VOLUME EXIT ${sym}: current vol ${currentVol.toLocaleString()} vs avg ${avgVol.toLocaleString()} (${volRatio.toFixed(0)}%) – selling`);
+          const r = await tzOrder(sym, "Sell", qty, cur);
+          if (r.success) {
+            recordPattern(state, pnlPct);
+            tradeLog.unshift({ type: "VOLUME_EXIT", symbol: sym, qty, price: cur, pnlPct: pnlPct.toFixed(1), ts: new Date().toISOString() });
+            await savePatterns();
+            delete openTrades[sym];
+            delete lastBuyTime[sym];
+            continue;
+          }
+        }
+      }
+    } catch (e) { console.log(`Volume exit check error for ${sym}:`, e.message); }
+
+    // ----- HARD STOP -15% -----
+    if (pnlPct <= -CONFIG.HARD_STOP_PCT) {
+      const etNow = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+      const tNow = etNow.getHours() * 100 + etNow.getMinutes();
+      const isWeekday = etNow.getDay() >= 1 && etNow.getDay() <= 5;
+      const mktOpen = isWeekday && tNow >= 400 && tNow <= 1945;
+      if (!mktOpen) {
         console.log(`⏸️ STOP queued for ${sym} (${pnlPct.toFixed(1)}%) — market closed`);
-        state._stopQueued=true;
+        state._stopQueued = true;
         continue;
       }
-      if(state._stopSent){
+      if (state._stopSent) {
         console.log(`⏸️ STOP already sent for ${sym}`);
         continue;
       }
       console.log(`🛑 STOP ${sym} ${pnlPct.toFixed(1)}%`);
-      const r=await tzOrder(sym,"Sell",qty,cur);
-      if(r.success){
-        state._stopSent=true;
+      const r = await tzOrder(sym, "Sell", qty, cur);
+      if (r.success) {
+        state._stopSent = true;
         recordPattern(state, pnlPct);
-        tradeLog.unshift({type:"STOP",symbol:sym,qty,price:cur,pnlPct:pnlPct.toFixed(1),ts:new Date().toISOString()});
+        tradeLog.unshift({ type: "STOP", symbol: sym, qty, price: cur, pnlPct: pnlPct.toFixed(1), ts: new Date().toISOString() });
         await savePatterns();
         delete openTrades[sym];
         delete lastBuyTime[sym];
@@ -839,43 +862,46 @@ const managePositions = async (tzPos) => {
       continue;
     }
 
-    if(!state.halfSold && pnlPct>=CONFIG.FIRST_TARGET_PCT){
-      const sellQty=Math.floor(qty/2);
-      if(sellQty>=1){
-        const r=await tzOrder(sym,"Sell",sellQty,cur);
-        if(r.success){
-          state.halfSold=true;
+    // ----- FIRST TARGET +30% – sell 50% -----
+    if (!state.halfSold && pnlPct >= CONFIG.FIRST_TARGET_PCT) {
+      const sellQty = Math.floor(qty / 2);
+      if (sellQty >= 1) {
+        const r = await tzOrder(sym, "Sell", sellQty, cur);
+        if (r.success) {
+          state.halfSold = true;
           console.log(`🎯 ${sym} +${pnlPct.toFixed(0)}% — sold 50%`);
-          tradeLog.unshift({type:"TARGET1",symbol:sym,qty:sellQty,price:cur,pnlPct:pnlPct.toFixed(1),ts:new Date().toISOString()});
+          tradeLog.unshift({ type: "TARGET1", symbol: sym, qty: sellQty, price: cur, pnlPct: pnlPct.toFixed(1), ts: new Date().toISOString() });
         }
       }
     }
 
-    if(state.halfSold && !state.quarterSold && pnlPct>=CONFIG.SECOND_TARGET_PCT){
-      const sellQty=Math.floor(qty/4);
-      if(sellQty>=1){
-        const r=await tzOrder(sym,"Sell",sellQty,cur);
-        if(r.success){
-          state.quarterSold=true;
+    // ----- SECOND TARGET +75% – sell 25% more -----
+    if (state.halfSold && !state.quarterSold && pnlPct >= CONFIG.SECOND_TARGET_PCT) {
+      const sellQty = Math.floor(qty / 4);
+      if (sellQty >= 1) {
+        const r = await tzOrder(sym, "Sell", sellQty, cur);
+        if (r.success) {
+          state.quarterSold = true;
           console.log(`🎯 ${sym} +${pnlPct.toFixed(0)}% — sold 25% more`);
-          tradeLog.unshift({type:"TARGET2",symbol:sym,qty:sellQty,price:cur,pnlPct:pnlPct.toFixed(1),ts:new Date().toISOString()});
+          tradeLog.unshift({ type: "TARGET2", symbol: sym, qty: sellQty, price: cur, pnlPct: pnlPct.toFixed(1), ts: new Date().toISOString() });
         }
       }
     }
 
-    if(state.halfSold && fromPeak<=-CONFIG.TRAIL_PCT){
-      const etNow2=new Date(new Date().toLocaleString("en-US",{timeZone:"America/New_York"}));
-      const tNow2=etNow2.getHours()*100+etNow2.getMinutes();
-      const isWeekday2=etNow2.getDay()>=1&&etNow2.getDay()<=5;
-      const mktOpen2=isWeekday2&&tNow2>=400&&tNow2<=1945;
-      if(!mktOpen2){console.log(`⏸️ Trail queued for ${sym}`);continue;}
-      if(state._trailSent){console.log(`⏸️ Trail already sent for ${sym}`);continue;}
+    // ----- TRAIL STOP -12% from peak (after first target) -----
+    if (state.halfSold && fromPeak <= -CONFIG.TRAIL_PCT) {
+      const etNow2 = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+      const tNow2 = etNow2.getHours() * 100 + etNow2.getMinutes();
+      const isWeekday2 = etNow2.getDay() >= 1 && etNow2.getDay() <= 5;
+      const mktOpen2 = isWeekday2 && tNow2 >= 400 && tNow2 <= 1945;
+      if (!mktOpen2) { console.log(`⏸️ Trail queued for ${sym}`); continue; }
+      if (state._trailSent) { console.log(`⏸️ Trail already sent for ${sym}`); continue; }
       console.log(`📉 TRAIL ${sym} ${fromPeak.toFixed(1)}% from peak`);
-      const r=await tzOrder(sym,"Sell",qty,cur);
-      if(r.success){
-        state._trailSent=true;
+      const r = await tzOrder(sym, "Sell", qty, cur);
+      if (r.success) {
+        state._trailSent = true;
         recordPattern(state, pnlPct);
-        tradeLog.unshift({type:"TRAIL",symbol:sym,qty,price:cur,pnlPct:pnlPct.toFixed(1),ts:new Date().toISOString()});
+        tradeLog.unshift({ type: "TRAIL", symbol: sym, qty, price: cur, pnlPct: pnlPct.toFixed(1), ts: new Date().toISOString() });
         await savePatterns();
         delete openTrades[sym];
         delete lastBuyTime[sym];
@@ -888,35 +914,35 @@ const managePositions = async (tzPos) => {
 // AUTO TRADER (with low pattern scores and unlimited positions)
 // ════════════════════════════════════════════════════════════════════════════
 const autoTrade = async () => {
-  lastScanTime=new Date().toISOString();
-  const et=new Date(new Date().toLocaleString("en-US",{timeZone:"America/New_York"}));
-  const h=et.getHours(),m=et.getMinutes(),t=h*100+m;
-  const isWeekend=et.getDay()===0||et.getDay()===6;
-  console.log(`\n🔍 ${h}:${String(m).padStart(2,"0")} ET — scanning`);
+  lastScanTime = new Date().toISOString();
+  const et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const h = et.getHours(), m = et.getMinutes(), t = h * 100 + m;
+  const isWeekend = et.getDay() === 0 || et.getDay() === 6;
+  console.log(`\n🔍 ${h}:${String(m).padStart(2, "0")} ET — scanning`);
 
   try {
-    const tzPos=await tzPositions();
-    for(const sym of Object.keys(openTrades)){
-      if(!tzPos.find(p=>p.sym===sym)){
+    const tzPos = await tzPositions();
+    for (const sym of Object.keys(openTrades)) {
+      if (!tzPos.find(p => p.sym === sym)) {
         console.log(`🗑️ ${sym} closed in TZ — removing`);
         delete openTrades[sym];
         delete lastBuyTime[sym];
       }
     }
-    if(tzPos.length) await managePositions(tzPos);
+    if (tzPos.length) await managePositions(tzPos);
 
-    const isEOD=!isWeekend&&t>=1955&&t<=2000;
-    if(isEOD&&tzPos.length){
+    const isEOD = !isWeekend && t >= 1955 && t <= 2000;
+    if (isEOD && tzPos.length) {
       console.log(`🌙 EOD SWEEP — selling ${tzPos.length} positions`);
-      for(const p of tzPos.filter(p=>!p.isShort)){
+      for (const p of tzPos.filter(p => !p.isShort)) {
         const quote = await yahooQuote(p.sym);
         const price = quote.c || p.entry;
-        if(price>0){
-          const r=await tzOrder(p.sym,"Sell",p.qty,price);
-          if(r.success){
-            const pnl=((price-p.entry)/p.entry*100).toFixed(1);
+        if (price > 0) {
+          const r = await tzOrder(p.sym, "Sell", p.qty, price);
+          if (r.success) {
+            const pnl = ((price - p.entry) / p.entry * 100).toFixed(1);
             console.log(`🌙 SOLD ${p.sym} x${p.qty} @$${price.toFixed(2)} | ${pnl}%`);
-            if(openTrades[p.sym]) recordPattern(openTrades[p.sym],parseFloat(pnl));
+            if (openTrades[p.sym]) recordPattern(openTrades[p.sym], parseFloat(pnl));
             delete openTrades[p.sym];
             delete lastBuyTime[p.sym];
           }
@@ -925,44 +951,44 @@ const autoTrade = async () => {
       return;
     }
 
-    if(isWeekend||t<400||t>1945){
-      if(lastGainers.length&&!isWeekend){
-        preMarketWatchlist=lastGainers.slice(0,10).map(g=>g.symbol);
+    if (isWeekend || t < 400 || t > 1945) {
+      if (lastGainers.length && !isWeekend) {
+        preMarketWatchlist = lastGainers.slice(0, 10).map(g => g.symbol);
         console.log(`📋 Pre-market watchlist: ${preMarketWatchlist.join(", ")}`);
       }
-      if(!isWeekend) await scanPreSpike();
+      if (!isWeekend) await scanPreSpike();
       console.log(`⏸️ Outside trading hours`);
       return;
     }
-    if(t>=400&&t<930) await scanPreSpike();
+    if (t >= 400 && t < 930) await scanPreSpike();
 
-    const longPos=tzPos.filter(p=>!p.isShort);
-    const botManaged=longPos.filter(p=>openTrades[p.sym]).length;
-    if(botManaged>=CONFIG.MAX_POSITIONS){
+    const longPos = tzPos.filter(p => !p.isShort);
+    const botManaged = longPos.filter(p => openTrades[p.sym]).length;
+    if (botManaged >= CONFIG.MAX_POSITIONS) {
       console.log(`🛑 Max ${CONFIG.MAX_POSITIONS} bot positions (${botManaged} managed, ${longPos.length} longs in TZ)`);
       return;
     }
-    if(longPos.length>=100){
+    if (longPos.length >= 100) {
       console.log(`⚠️ TZ has ${longPos.length} long positions — not adding more`);
       return;
     }
 
-    const acc=await tzAccount();
+    const acc = await tzAccount();
     console.log(`💵 Equity:$${acc.equity?.toFixed(0)} Cash:$${acc.cash?.toFixed(0)} PnL:$${acc.pnl?.toFixed(0)}`);
-    if(acc.cash<2000){console.log("💵 Low cash");return;}
+    if (acc.cash < 2000) { console.log("💵 Low cash"); return; }
 
-    const movers=await scanForSpikes();
-    if(!movers.length) return;
-    lastGainers=movers.slice(0,20);
-    console.log(`🔥 Top spikes: ${movers.slice(0,5).map(g=>`${g.symbol}+${g.pct?.toFixed(0)}% ${(g.vol/1e6).toFixed(1)}Mvol`).join(" | ")}`);
+    const movers = await scanForSpikes();
+    if (!movers.length) return;
+    lastGainers = movers.slice(0, 20);
+    console.log(`🔥 Top spikes: ${movers.slice(0, 5).map(g => `${g.symbol}+${g.pct?.toFixed(0)}% ${(g.vol / 1e6).toFixed(1)}Mvol`).join(" | ")}`);
 
-    const ownedLongs=longPos.map(p=>p.sym);
-    const candidates=movers.filter(g=>!ownedLongs.includes(g.symbol)).slice(0,8);
-    if(!candidates.length){console.log("⏭️ All spikes already owned");return;}
+    const ownedLongs = longPos.map(p => p.sym);
+    const candidates = movers.filter(g => !ownedLongs.includes(g.symbol)).slice(0, 8);
+    if (!candidates.length) { console.log("⏭️ All spikes already owned"); return; }
 
-    const slotsLeft=CONFIG.MAX_POSITIONS-longPos.length;
-    const scored=[];
-    for(const stock of candidates.slice(0,6)){
+    const slotsLeft = CONFIG.MAX_POSITIONS - longPos.length;
+    const scored = [];
+    for (const stock of candidates.slice(0, 6)) {
       if (lastBuyTime[stock.symbol] && (Date.now() - lastBuyTime[stock.symbol]) < CONFIG.COOLDOWN_MINUTES * 60 * 1000) {
         console.log(`⏸️ ${stock.symbol} in cooldown`);
         continue;
@@ -975,78 +1001,78 @@ const autoTrade = async () => {
       try {
         const cap = await yahooMarketCap(stock.symbol);
         mktCapM = cap / 1e6;
-      } catch(e) {}
-      if(mktCapM > CONFIG.MAX_MKTCAP_M && mktCapM > 0){
+      } catch (e) { }
+      if (mktCapM > CONFIG.MAX_MKTCAP_M && mktCapM > 0) {
         console.log(`🚫 ${stock.symbol}: mktcap $${mktCapM.toFixed(0)}M > $${CONFIG.MAX_MKTCAP_M}M limit`);
         continue;
       }
-      const chart=await analyzeChart(stock.symbol);
-      if(chart.patternScore<5&&chart.relVol<2) continue;
-      console.log(`  📊 ${stock.symbol}: +${stock.pct?.toFixed(0)}% | vol:${(stock.vol/1e6).toFixed(1)}M | relVol:${chart.relVol}x | score:${chart.patternScore}`);
-      scored.push({...stock, mktCapM, chart, finalScore: chart.patternScore});
-      await new Promise(r=>setTimeout(r,200));
+      const chart = await analyzeChart(stock.symbol);
+      if (chart.patternScore < 5 && chart.relVol < 2) continue;
+      console.log(`  📊 ${stock.symbol}: +${stock.pct?.toFixed(0)}% | vol:${(stock.vol / 1e6).toFixed(1)}M | relVol:${chart.relVol}x | score:${chart.patternScore}`);
+      scored.push({ ...stock, mktCapM, chart, finalScore: chart.patternScore });
+      await new Promise(r => setTimeout(r, 200));
     }
-    if(!scored.length){console.log("⏭️ No stocks passed pattern filter");return;}
-    scored.sort((a,b)=>b.finalScore-a.finalScore);
+    if (!scored.length) { console.log("⏭️ No stocks passed pattern filter"); return; }
+    scored.sort((a, b) => b.finalScore - a.finalScore);
 
-    for(const stock of scored.slice(0,slotsLeft)){
-      if(stock.finalScore<5) continue;
+    for (const stock of scored.slice(0, slotsLeft)) {
+      if (stock.finalScore < 5) continue;
       const price = stock.price;
-      if(!price||price<=0||price<CONFIG.MIN_PRICE||price>CONFIG.MAX_PRICE) continue;
-      const maxDollars=Math.min(acc.cash*CONFIG.CASH_PCT, CONFIG.MAX_CASH_PER_TRADE);
-      const qty=Math.floor(maxDollars/price);
-      if(qty<1) continue;
-      console.log(`🚀 BUY ${stock.symbol} x${qty} @$${price} | +${stock.pct?.toFixed(0)}% | ${(stock.vol/1e6).toFixed(1)}Mvol | relVol:${stock.chart.relVol}x | score:${stock.finalScore}`);
-      const order=await tzOrder(stock.symbol,"Buy",qty,price);
-      if(order.success){
-        openTrades[stock.symbol]={
-          entry:price, qty, peak:price,
-          halfSold:false, quarterSold:false,
-          time:Date.now(), hour:h,
-          relVol:stock.chart.relVol,
-          volAccel:stock.chart.volAccel,
-          entryGainPct:stock.pct,
-          float:stock.float,
-          patternScore:stock.finalScore,
+      if (!price || price <= 0 || price < CONFIG.MIN_PRICE || price > CONFIG.MAX_PRICE) continue;
+      const maxDollars = Math.min(acc.cash * CONFIG.CASH_PCT, CONFIG.MAX_CASH_PER_TRADE);
+      const qty = Math.floor(maxDollars / price);
+      if (qty < 1) continue;
+      console.log(`🚀 BUY ${stock.symbol} x${qty} @$${price} | +${stock.pct?.toFixed(0)}% | ${(stock.vol / 1e6).toFixed(1)}Mvol | relVol:${stock.chart.relVol}x | score:${stock.finalScore}`);
+      const order = await tzOrder(stock.symbol, "Buy", qty, price);
+      if (order.success) {
+        openTrades[stock.symbol] = {
+          entry: price, qty, peak: price,
+          halfSold: false, quarterSold: false,
+          time: Date.now(), hour: h,
+          relVol: stock.chart.relVol,
+          volAccel: stock.chart.volAccel,
+          entryGainPct: stock.pct,
+          float: stock.float,
+          patternScore: stock.finalScore,
         };
         lastBuyTime[stock.symbol] = Date.now();
-        tradeLog.unshift({type:"BUY",symbol:stock.symbol,qty,price,pct:stock.pct,vol:stock.vol,relVol:stock.chart.relVol,score:stock.finalScore,ts:new Date().toISOString()});
+        tradeLog.unshift({ type: "BUY", symbol: stock.symbol, qty, price, pct: stock.pct, vol: stock.vol, relVol: stock.chart.relVol, score: stock.finalScore, ts: new Date().toISOString() });
         console.log(`✅ ${stock.symbol} bought`);
       } else {
-        console.log(`❌ ${stock.symbol} failed: ${order.status||order.error}`);
+        console.log(`❌ ${stock.symbol} failed: ${order.status || order.error}`);
       }
     }
-  } catch(e){console.error("autoTrade:",e.message);}
+  } catch (e) { console.error("autoTrade:", e.message); }
 };
 
 // ════════════════════════════════════════════════════════════════════════════
 // SCHEDULER (unchanged)
 // ════════════════════════════════════════════════════════════════════════════
 const getInterval = () => {
-  const et=new Date(new Date().toLocaleString("en-US",{timeZone:"America/New_York"}));
-  const t=et.getHours()*100+et.getMinutes();
-  if(t>=930&&t<1000) return 15000;
-  if(t>=400&&t<930)  return 90000;
-  if(t>=1000&&t<1530) return 60000;
-  if(t>=1530&&t<1600) return 30000;
-  if(t>=1600&&t<1945) return 120000;
+  const et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const t = et.getHours() * 100 + et.getMinutes();
+  if (t >= 930 && t < 1000) return 15000;
+  if (t >= 400 && t < 930) return 90000;
+  if (t >= 1000 && t < 1530) return 60000;
+  if (t >= 1530 && t < 1600) return 30000;
+  if (t >= 1600 && t < 1945) return 120000;
   return 3600000;
 };
 
 const startAutoTrader = () => {
-  if(autoTraderActive) return;
-  autoTraderActive=true;
-  console.log("🤖 PulseTrader v20.9 STARTED — Fixed TradeZero API + Fallback");
-  const run=async()=>{
+  if (autoTraderActive) return;
+  autoTraderActive = true;
+  console.log("🤖 PulseTrader v21.0 STARTED — Pre‑market Scanner + Volume Exit");
+  const run = async () => {
     await autoTrade();
-    if(autoTraderActive) scanTimer=setTimeout(run,getInterval());
+    if (autoTraderActive) scanTimer = setTimeout(run, getInterval());
   };
   run();
 };
 
 const stopAutoTrader = () => {
-  if(scanTimer) clearTimeout(scanTimer);
-  autoTraderActive=false; scanTimer=null;
+  if (scanTimer) clearTimeout(scanTimer);
+  autoTraderActive = false; scanTimer = null;
   console.log("⏹️ Stopped");
 };
 
@@ -1054,25 +1080,25 @@ const startup = async () => {
   console.log("🔄 Syncing with TZ...");
   await loadPatterns();
   try {
-    const positions=await tzPositions();
-    const longs=positions.filter(p=>!p.isShort);
-    const shorts=positions.filter(p=>p.isShort);
-    if(shorts.length) console.log(`⚠️ Found ${shorts.length} SHORT positions in TZ: ${shorts.map(p=>p.sym).join(",")} — bot will NOT manage these`);
-    for(const p of longs){
-      if(!openTrades[p.sym]&&p.entry>0){
+    const positions = await tzPositions();
+    const longs = positions.filter(p => !p.isShort);
+    const shorts = positions.filter(p => p.isShort);
+    if (shorts.length) console.log(`⚠️ Found ${shorts.length} SHORT positions in TZ: ${shorts.map(p => p.sym).join(",")} — bot will NOT manage these`);
+    for (const p of longs) {
+      if (!openTrades[p.sym] && p.entry > 0) {
         const quote = await yahooQuote(p.sym);
         const cur = quote.c || p.entry;
-        const pnlPct=cur>0?((cur-p.entry)/p.entry)*100:0;
-        if(cur>0&&pnlPct<=-CONFIG.HARD_STOP_PCT){
+        const pnlPct = cur > 0 ? ((cur - p.entry) / p.entry) * 100 : 0;
+        if (cur > 0 && pnlPct <= -CONFIG.HARD_STOP_PCT) {
           console.log(`⚠️ NOT restoring ${p.sym} — already at ${pnlPct.toFixed(1)}% (past hard stop). Skipping.`);
           continue;
         }
-        openTrades[p.sym]={entry:p.entry,qty:p.qty,peak:cur||p.entry,halfSold:false,quarterSold:false,time:Date.now(),hour:new Date().getHours()};
-        console.log(`📍 Restored LONG: ${p.sym} x${p.qty} @$${p.entry} | now $${cur.toFixed(2)} (${pnlPct>=0?"+":""}${pnlPct.toFixed(1)}%)`);
+        openTrades[p.sym] = { entry: p.entry, qty: p.qty, peak: cur || p.entry, halfSold: false, quarterSold: false, time: Date.now(), hour: new Date().getHours() };
+        console.log(`📍 Restored LONG: ${p.sym} x${p.qty} @$${p.entry} | now $${cur.toFixed(2)} (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%)`);
       }
     }
     console.log(`🛡️ ${Object.keys(openTrades).length} long positions under management`);
-  } catch(e){console.log("Startup:",e.message);}
+  } catch (e) { console.log("Startup:", e.message); }
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1117,7 +1143,7 @@ app.post("/api/chat", async (req, res) => {
       reply = "No recent movers. Run a scan (bot will auto‑scan every minute).";
     } else {
       const top = lastGainers.slice(0, 8);
-      reply = "**Top Spikes from Last Scan**\n" + top.map((g, i) => `${i+1}. ${g.symbol} +${g.pct?.toFixed(1)}% @ $${g.price} | ${(g.vol/1e6).toFixed(1)}M vol`).join("\n");
+      reply = "**Top Spikes from Last Scan**\n" + top.map((g, i) => `${i + 1}. ${g.symbol} +${g.pct?.toFixed(1)}% @ $${g.price} | ${(g.vol / 1e6).toFixed(1)}M vol`).join("\n");
     }
   }
   else if (command.startsWith("EXECUTE_STOP")) {
@@ -1175,7 +1201,7 @@ app.post("/api/chat", async (req, res) => {
       const pct = quote.dp || 0;
       const vol = quote.v || 0;
       const mcap = await yahooMarketCap(sym);
-      reply = `**Analysis for $${sym}**\n- Price: $${price.toFixed(2)} (${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%)\n- Volume: ${(vol/1e6).toFixed(2)}M\n- Market Cap: $${(mcap/1e6).toFixed(0)}M\n- Relative Volume: ${chart.relVol}x\n- Volume Acceleration: ${chart.volAccel}x\n- Pattern Score: ${chart.patternScore}/100\n- VWAP: $${chart.vwap?.toFixed(2)} ${chart.aboveVWAP ? "✅ above" : "❌ below"}\n- Higher Highs/Higher Lows: ${chart.hhhl ? "✅" : "❌"}\n- 3 Green Rising Candles: ${chart.greenRising ? "✅" : "❌"}`;
+      reply = `**Analysis for $${sym}**\n- Price: $${price.toFixed(2)} (${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%)\n- Volume: ${(vol / 1e6).toFixed(2)}M\n- Market Cap: $${(mcap / 1e6).toFixed(0)}M\n- Relative Volume: ${chart.relVol}x\n- Volume Acceleration: ${chart.volAccel}x\n- Pattern Score: ${chart.patternScore}/100\n- VWAP: $${chart.vwap?.toFixed(2)} ${chart.aboveVWAP ? "✅ above" : "❌ below"}\n- Higher Highs/Higher Lows: ${chart.hhhl ? "✅" : "❌"}\n- 3 Green Rising Candles: ${chart.greenRising ? "✅" : "❌"}`;
     }
   }
   else if (command.startsWith("EXECUTE_COVER_ALL")) {
@@ -1189,7 +1215,7 @@ app.post("/api/chat", async (req, res) => {
         const price = quote.c || p.entry;
         const limitPrice = parseFloat((price * 1.002).toFixed(4));
         const body = {
-          clientOrderId: `PT-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,
+          clientOrderId: `PT-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
           symbol: p.sym,
           securityType: "Stock",
           side: "Buy",
@@ -1217,7 +1243,7 @@ app.post("/api/chat", async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// API KEY STATUS DASHBOARD
+// API KEY STATUS DASHBOARD (unchanged)
 // ════════════════════════════════════════════════════════════════════════════
 const testApiKey = async (url, options = {}) => {
   const controller = new AbortController();
@@ -1364,148 +1390,146 @@ app.get("/keys-status", (req, res) => {
 // ════════════════════════════════════════════════════════════════════════════
 // ROUTES (unchanged)
 // ════════════════════════════════════════════════════════════════════════════
-app.post("/api/autotrader/start",(_,res)=>{startAutoTrader();res.json({status:"started"});});
-app.get( "/api/autotrader/start",(_,res)=>{startAutoTrader();res.json({status:"started"});});
-app.post("/api/autotrader/stop", (_,res)=>{stopAutoTrader();res.json({status:"stopped"});});
-app.post("/api/autotrader/scan", async(_,res)=>{res.json({ok:true});autoTrade();});
-app.get("/api/alerts",(_,res)=>res.json({alerts:[]}));
-app.post("/api/autotrader/sellall",async(_,res)=>{
-  const positions=await tzPositions();
-  const longsOnly=positions.filter(p=>!p.isShort);
-  let sold=0;
-  for(const p of longsOnly){
+app.post("/api/autotrader/start", (_, res) => { startAutoTrader(); res.json({ status: "started" }); });
+app.get("/api/autotrader/start", (_, res) => { startAutoTrader(); res.json({ status: "started" }); });
+app.post("/api/autotrader/stop", (_, res) => { stopAutoTrader(); res.json({ status: "stopped" }); });
+app.post("/api/autotrader/scan", async (_, res) => { res.json({ ok: true }); autoTrade(); });
+app.get("/api/alerts", (_, res) => res.json({ alerts: [] }));
+app.post("/api/autotrader/sellall", async (_, res) => {
+  const positions = await tzPositions();
+  const longsOnly = positions.filter(p => !p.isShort);
+  let sold = 0;
+  for (const p of longsOnly) {
     const quote = await yahooQuote(p.sym);
     const price = quote.c || p.entry;
-    if(price){const r=await tzOrder(p.sym,"Sell",p.qty,price);if(r.success){sold++;delete openTrades[p.sym]; delete lastBuyTime[p.sym];}}
+    if (price) { const r = await tzOrder(p.sym, "Sell", p.qty, price); if (r.success) { sold++; delete openTrades[p.sym]; delete lastBuyTime[p.sym]; } }
   }
-  res.json({sold,total:longsOnly.length});
+  res.json({ sold, total: longsOnly.length });
 });
-app.get("/api/autotrader/status",async(_,res)=>{
-  const[acc,pos]=await Promise.all([tzAccount().catch(()=>null),tzPositions().catch(()=>[])]);
+app.get("/api/autotrader/status", async (_, res) => {
+  const [acc, pos] = await Promise.all([tzAccount().catch(() => null), tzPositions().catch(() => [])]);
   res.json({
-    active:autoTraderActive,last_scan:lastScanTime,version:"20.9.0",
-    equity:acc?.equity?.toFixed(2),cash:acc?.cash?.toFixed(2),pnl:acc?.pnl?.toFixed(2),
-    positions:pos.length,max_positions:CONFIG.MAX_POSITIONS,
-    open_trades:Object.keys(openTrades),
-    patterns:{winners:PATTERNS.winners.length,losers:PATTERNS.losers.length,stats:PATTERNS.stats},
-    recent_trades:tradeLog.slice(0,20),
-    top_movers:lastGainers.slice(0,10),
-    config:CONFIG,
+    active: autoTraderActive, last_scan: lastScanTime, version: "21.0.0",
+    equity: acc?.equity?.toFixed(2), cash: acc?.cash?.toFixed(2), pnl: acc?.pnl?.toFixed(2),
+    positions: pos.length, max_positions: CONFIG.MAX_POSITIONS,
+    open_trades: Object.keys(openTrades),
+    patterns: { winners: PATTERNS.winners.length, losers: PATTERNS.losers.length, stats: PATTERNS.stats },
+    recent_trades: tradeLog.slice(0, 20),
+    top_movers: lastGainers.slice(0, 10),
+    config: CONFIG,
   });
 });
-app.get("/api/holdings",async(_,res)=>{
-  try{
-    const raw=await tzAPI("GET",`/v1/api/accounts/${ACC()}/positions`);
-    const list=Array.isArray(raw)?raw:(raw.positions||raw.data||raw||[]);
-    if(!Array.isArray(list)||!list.length){
-      const acc2=await tzAccount().catch(()=>null);
-      return res.json({holdings:[],count:0,total_pnl:"0.00",today_pnl:acc2?.pnl?.toFixed(2)||"0"});
+app.get("/api/holdings", async (_, res) => {
+  try {
+    const raw = await tzAPI("GET", `/v1/api/accounts/${ACC()}/positions`);
+    const list = Array.isArray(raw) ? raw : (raw.positions || raw.data || raw || []);
+    if (!Array.isArray(list) || !list.length) {
+      const acc2 = await tzAccount().catch(() => null);
+      return res.json({ holdings: [], count: 0, total_pnl: "0.00", today_pnl: acc2?.pnl?.toFixed(2) || "0" });
     }
-    const syms=[...new Set(list.map(p=>(p.symbol||p.ticker||"").toUpperCase()).filter(Boolean))];
-    const priceMap={};
-    await Promise.all(syms.map(async sym=>{
+    const syms = [...new Set(list.map(p => (p.symbol || p.ticker || "").toUpperCase()).filter(Boolean))];
+    const priceMap = {};
+    await Promise.all(syms.map(async sym => {
       const quote = await yahooQuote(sym);
       priceMap[sym] = quote.c || 0;
     }));
-    const rawMap={};
-    for(const p of list){
-      const sym=(p.symbol||p.ticker||"").toString().trim().toUpperCase();
-      if(!sym) continue;
-      const qty=Math.abs(parseFloat(p.shares??p.quantity??p.qty??0));
-      const entry=parseFloat(p.priceAvg??p.averagePrice??p.avgPrice??p.entryPrice??0);
-      const side=(p.side||"").toLowerCase();
-      if(side==="sell"||qty<=0) continue;
-      if(!rawMap[sym]){
-        rawMap[sym]={sym,qty,entry};
+    const rawMap = {};
+    for (const p of list) {
+      const sym = (p.symbol || p.ticker || "").toString().trim().toUpperCase();
+      if (!sym) continue;
+      const qty = Math.abs(parseFloat(p.shares ?? p.quantity ?? p.qty ?? 0));
+      const entry = parseFloat(p.priceAvg ?? p.averagePrice ?? p.avgPrice ?? p.entryPrice ?? 0);
+      const side = (p.side || "").toLowerCase();
+      if (side === "sell" || qty <= 0) continue;
+      if (!rawMap[sym]) {
+        rawMap[sym] = { sym, qty, entry };
       } else {
-        const totalQty=rawMap[sym].qty+qty;
-        rawMap[sym].entry=(rawMap[sym].entry*rawMap[sym].qty+entry*qty)/totalQty;
-        rawMap[sym].qty=totalQty;
+        const totalQty = rawMap[sym].qty + qty;
+        rawMap[sym].entry = (rawMap[sym].entry * rawMap[sym].qty + entry * qty) / totalQty;
+        rawMap[sym].qty = totalQty;
       }
     }
-    const holdings=Object.values(rawMap).map(p=>{
-      const sym=p.sym;
-      const qty=p.qty;
-      const entry=p.entry;
-      const cur=priceMap[sym]||entry;
-      const pnl=entry>0&&cur>0?(cur-entry)*qty:0;
-      const pct=entry>0&&cur>0?((cur-entry)/entry*100):0;
+    const holdings = Object.values(rawMap).map(p => {
+      const sym = p.sym;
+      const qty = p.qty;
+      const entry = p.entry;
+      const cur = priceMap[sym] || entry;
+      const pnl = entry > 0 && cur > 0 ? (cur - entry) * qty : 0;
+      const pct = entry > 0 && cur > 0 ? ((cur - entry) / entry) * 100 : 0;
       return {
-        symbol:sym,
+        symbol: sym,
         qty,
-        side:"long",
-        avg_entry:entry.toFixed(4),
-        current_price:cur.toFixed(4),
-        unrealized_pnl:pnl.toFixed(2),
-        unrealized_pnl_pct:pct.toFixed(2)+"%",
-        hard_stop:(entry*(1-CONFIG.HARD_STOP_PCT/100)).toFixed(4),
-        first_target:(entry*(1+CONFIG.FIRST_TARGET_PCT/100)).toFixed(4),
+        side: "long",
+        avg_entry: entry.toFixed(4),
+        current_price: cur.toFixed(4),
+        unrealized_pnl: pnl.toFixed(2),
+        unrealized_pnl_pct: pct.toFixed(2) + "%",
+        hard_stop: (entry * (1 - CONFIG.HARD_STOP_PCT / 100)).toFixed(4),
+        first_target: (entry * (1 + CONFIG.FIRST_TARGET_PCT / 100)).toFixed(4),
       };
-    }).filter(p=>p.symbol&&p.qty>0);
-    const acc=await tzAccount().catch(()=>null);
-    const totalPnl=holdings.reduce((s,h)=>s+parseFloat(h.unrealized_pnl),0);
+    }).filter(p => p.symbol && p.qty > 0);
+    const acc = await tzAccount().catch(() => null);
+    const totalPnl = holdings.reduce((s, h) => s + parseFloat(h.unrealized_pnl), 0);
     res.json({
       holdings,
-      count:holdings.length,
-      total_pnl:totalPnl.toFixed(2),
-      today_pnl:acc?.pnl?.toFixed(2)||"0",
-      equity:acc?.equity?.toFixed(2)||"0",
-      cash:acc?.cash?.toFixed(2)||"0",
+      count: holdings.length,
+      total_pnl: totalPnl.toFixed(2),
+      today_pnl: acc?.pnl?.toFixed(2) || "0",
+      equity: acc?.equity?.toFixed(2) || "0",
+      cash: acc?.cash?.toFixed(2) || "0",
     });
-  }catch(e){res.status(500).json({error:e.message});}
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
-app.get("/api/account",async(_,res)=>{
-  try{const acc=await tzAccount();res.json({equity:acc.equity.toFixed(2),cash:acc.cash.toFixed(2),pnl_today:acc.pnl.toFixed(2)});}
-  catch(e){res.status(500).json({error:e.message});}
+app.get("/api/account", async (_, res) => {
+  try { const acc = await tzAccount(); res.json({ equity: acc.equity.toFixed(2), cash: acc.cash.toFixed(2), pnl_today: acc.pnl.toFixed(2) }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
 });
-app.get("/api/movers",async(_,res)=>{
-  try{
-    const movers=await scanForSpikes();
-    lastGainers=movers.slice(0,20);
-    res.json({movers:movers.slice(0,20),count:movers.length,ts:new Date().toISOString()});
-  }catch(e){res.status(500).json({error:e.message});}
+app.get("/api/movers", async (_, res) => {
+  try {
+    const movers = await scanForSpikes();
+    lastGainers = movers.slice(0, 20);
+    res.json({ movers: movers.slice(0, 20), count: movers.length, ts: new Date().toISOString() });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
-app.get("/api/quote",async(req,res)=>{
-  const{ticker="SPY"}=req.query;
-  try{
+app.get("/api/quote", async (req, res) => {
+  const { ticker = "SPY" } = req.query;
+  try {
     const quote = await yahooQuote(ticker.toUpperCase());
-    res.json({ticker, price: quote.c, pct: quote.dp, vol: quote.v});
-  } catch(e){res.status(500).json({error:e.message});}
+    res.json({ ticker, price: quote.c, pct: quote.dp, vol: quote.v });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
-app.get("/api/trades",async(_,res)=>{
-  try{res.json(await supabase("pulsetrader_trades?order=created_at.desc&limit=100").then(d=>Array.isArray(d)?d:[]));}
-  catch(e){res.status(500).json({error:e.message});}
+app.get("/api/trades", async (_, res) => {
+  try { res.json(await supabase("pulsetrader_trades?order=created_at.desc&limit=100").then(d => Array.isArray(d) ? d : [])); }
+  catch (e) { res.status(500).json({ error: e.message }); }
 });
-app.post("/api/order",async(req,res)=>{
-  const{symbol,side,qty,price}=req.body;
-  if(!symbol||!side||!qty||!price) return res.status(400).json({error:"symbol,side,qty,price required"});
-  try{const r=await tzOrder(symbol.toUpperCase(),side==="buy"?"Buy":"Sell",parseInt(qty),parseFloat(price));res.json(r);}
-  catch(e){res.status(500).json({error:e.message});}
+app.post("/api/order", async (req, res) => {
+  const { symbol, side, qty, price } = req.body;
+  if (!symbol || !side || !qty || !price) return res.status(400).json({ error: "symbol,side,qty,price required" });
+  try { const r = await tzOrder(symbol.toUpperCase(), side === "buy" ? "Buy" : "Sell", parseInt(qty), parseFloat(price)); res.json(r); }
+  catch (e) { res.status(500).json({ error: e.message }); }
 });
-app.get("/api/debug/positions",async(_,res)=>{
-  try{const raw=await tzAPI("GET",`/v1/api/accounts/${ACC()}/positions`);const list=Array.isArray(raw)?raw:(raw.positions||raw.data||[]);res.json({count:list.length,first:list[0]||null});}
-  catch(e){res.status(500).json({error:e.message});}
+app.get("/api/debug/positions", async (_, res) => {
+  try { const raw = await tzAPI("GET", `/v1/api/accounts/${ACC()}/positions`); const list = Array.isArray(raw) ? raw : (raw.positions || raw.data || []); res.json({ count: list.length, first: list[0] || null }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
 });
-app.get("/api/news",async(req,res)=>{
-  res.json([]);
-});
-app.get("/health",(_,res)=>res.json({
-  status:"ok",version:"20.9.0",
-  active:autoTraderActive,
-  positions:Object.keys(openTrades).length,
-  patterns:{winners:PATTERNS.winners.length,losers:PATTERNS.losers.length},
-  ts:new Date().toISOString()
+app.get("/api/news", async (req, res) => { res.json([]); });
+app.get("/health", (_, res) => res.json({
+  status: "ok", version: "21.0.0",
+  active: autoTraderActive,
+  positions: Object.keys(openTrades).length,
+  patterns: { winners: PATTERNS.winners.length, losers: PATTERNS.losers.length },
+  ts: new Date().toISOString()
 }));
 
 // ════════════════════════════════════════════════════════════════════════════
 // START
 // ════════════════════════════════════════════════════════════════════════════
-const PORT=process.env.PORT||3001;
-app.listen(PORT,async()=>{
-  console.log(`⚡ PulseTrader v20.9 — Fixed TradeZero API + Fallback`);
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, async () => {
+  console.log(`⚡ PulseTrader v21.0 — Pre‑market Scanner + Volume Exit`);
   console.log(`   Targets: JZ +325% | HKIT +350% | ABTS +115% | HUBC +97%`);
   console.log(`   Max positions: ${CONFIG.MAX_POSITIONS} | Stop: -${CONFIG.HARD_STOP_PCT}%`);
-  console.log(`   Sources: Finviz, FMP, Massive, Twelve Data, Yahoo, Alpha Vantage, Alpaca, Watchlists`);
+  console.log(`   Sources: Finviz pre‑market, Finviz regular, FMP, Massive, Twelve Data, Yahoo, Alpha Vantage, Alpaca`);
   await startup();
   startAutoTrader();
 });
